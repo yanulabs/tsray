@@ -116,7 +116,12 @@ export function runArchitecturalDiff(
 
     const relative = toPosix(path.relative(gitTop, headIndexer.root));
     const baseTarget = path.join(temporary, relative);
-    const baseIndexer = new TsReactIndexer(baseTarget, indexerOptions);
+    const baseOptions: IndexerOptions = { ...indexerOptions };
+    if (baseOptions.tsconfig && path.isAbsolute(baseOptions.tsconfig)) {
+      const relativeConfig = path.relative(headIndexer.root, baseOptions.tsconfig);
+      if (!relativeConfig.startsWith("..")) baseOptions.tsconfig = relativeConfig;
+    }
+    const baseIndexer = new TsReactIndexer(baseTarget, baseOptions);
     const baseSnapshot = baseIndexer.buildIndex({ fullDiagnostics: true });
 
     const baseCycleKeys = new Set(baseSnapshot.moduleCycles.map(cycleKey));
