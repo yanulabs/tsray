@@ -184,7 +184,7 @@ export function detectTypecheckRunner(root: string, config: TsrayConfig): Runner
   if (config.runner.typecheck) {
     return { available: true, command: config.runner.typecheck, source: "tsray.json runner.typecheck" };
   }
-  const script = scripts.typecheck ? "typecheck" : scripts["type-check"] ? "type-check" : scripts.build ? "build" : null;
+  const script = scripts.typecheck ? "typecheck" : scripts["type-check"] ? "type-check" : null;
   if (script) {
     return {
       available: true,
