@@ -3,6 +3,10 @@ node_modules/
 /bin/
 /coverage/
 *.log
+*.tgz
+*.db
+*.db-wal
+*.db-shm
 .DS_Store
 .vitest/
 *.tsbuildinfo
