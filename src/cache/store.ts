@@ -76,7 +76,8 @@ function slugify(name: string): string {
 
 export function resolveDbPaths(canonicalRoot: string, projectId: string, overrideDb?: string): DbPaths {
   if (overrideDb) {
-    return { workingPath: overrideDb, summaryPath: overrideDb, singleMode: true };
+    const resolved = overrideDb === ":memory:" ? overrideDb : path.resolve(overrideDb);
+    return { workingPath: resolved, summaryPath: resolved, singleMode: true };
   }
   const cacheRoot = getCacheRoot();
   const workingPath = path.join(
@@ -138,6 +139,22 @@ export function planDatabaseRemoval(
   };
 }
 
+function isSqliteFile(file: string): boolean {
+  try {
+    if (fs.statSync(file).size === 0) return true;
+    const header = Buffer.alloc(16);
+    const descriptor = fs.openSync(file, "r");
+    try {
+      fs.readSync(descriptor, header, 0, 16, 0);
+    } finally {
+      fs.closeSync(descriptor);
+    }
+    return header.toString("utf8") === "SQLite format 3\u0000";
+  } catch {
+    return false;
+  }
+}
+
 export function removeDatabases(
   plan: DbRemovalPlan,
   options: { force?: boolean; dryRun?: boolean } = {}
@@ -152,6 +169,10 @@ export function removeDatabases(
       if (item.path.endsWith("-wal") || item.path.endsWith("-shm")) {
         fs.rmSync(item.path, { force: true });
         removed.push(item.path);
+        continue;
+      }
+      if (!isSqliteFile(item.path)) {
+        skipped.push({ path: item.path, reason: "not a SQLite database" });
         continue;
       }
       probe = new DatabaseSync(item.path);
@@ -237,6 +258,7 @@ export class DualCacheStore {
   private readonly summaryDb: DatabaseSync;
   private readonly singleMode: boolean;
   private readonly statements = new Map<string, StatementSync>();
+  private closed = false;
 
   constructor(canonicalRoot: string, projectId: string, options: StoreOptions = {}) {
     const paths = resolveDbPaths(canonicalRoot, projectId, options.overrideDb);
@@ -462,7 +484,11 @@ export class DualCacheStore {
       for (const [key, value] of Object.entries(meta)) upsertMeta.run(key, value);
       this.workingDb.exec("COMMIT");
     } catch (error) {
-      this.workingDb.exec("ROLLBACK");
+      try {
+        this.workingDb.exec("ROLLBACK");
+      } catch {
+        // The transaction may already be closed by SQLite.
+      }
       throw error;
     }
   }
@@ -515,10 +541,18 @@ export class DualCacheStore {
 
     if (history.last_self_hash === symbol.selfHash) {
       if (trackAccess) this.touch(history.last_content_hash);
+      let summary = previousSummary;
+      if (!summary) {
+        const fallback = this.stmt(
+          "summaryBySelf",
+          "SELECT summary_json FROM summary_cache WHERE self_hash = ? AND prompt_version = ? AND kind = ? ORDER BY last_accessed_at DESC LIMIT 1"
+        ).get(symbol.selfHash, this.promptVersion, symbol.kind) as { summary_json: string } | undefined;
+        summary = fallback ? parseSummary(fallback.summary_json) : null;
+      }
       return {
         state: "soft_stale",
         reason: "deps_changed",
-        summary: previousSummary,
+        summary,
         previousSummary: null,
         depsChanged: true,
       };
@@ -682,7 +716,11 @@ export class DualCacheStore {
       }
       this.summaryDb.exec("COMMIT");
     } catch (error) {
-      this.summaryDb.exec("ROLLBACK");
+      try {
+        this.summaryDb.exec("ROLLBACK");
+      } catch {
+        // The transaction may already be closed by SQLite.
+      }
       throw error;
     }
 
@@ -813,6 +851,8 @@ export class DualCacheStore {
   }
 
   close(): void {
+    if (this.closed) return;
+    this.closed = true;
     this.statements.clear();
     this.workingDb.close();
     if (!this.singleMode) this.summaryDb.close();
