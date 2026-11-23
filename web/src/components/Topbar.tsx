@@ -112,7 +112,7 @@ function StatusBadge({ status }: { status: LiveStatus }): React.ReactElement {
   if (status === "static") {
     return (
       <Badge className="border-zinc-200 bg-zinc-50 text-zinc-500 dark:border-zinc-800 dark:bg-zinc-900 dark:text-zinc-400">
-        offline file
+        static file
       </Badge>
     );
   }

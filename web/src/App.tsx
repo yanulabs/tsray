@@ -100,6 +100,7 @@ export default function App(): React.ReactElement {
       return;
     }
     const controller = new AbortController();
+    setDetail(null);
     setDetailLoading(true);
     fetchSymbolDetail(selectedSymbolId, controller.signal)
       .then((next) => {

@@ -110,7 +110,11 @@ export async function fetchSymbolDetail(id: string, signal?: AbortSignal): Promi
     signal,
   });
   if (!response.ok) throw new Error(`symbol endpoint returned HTTP ${response.status}`);
-  return (await response.json()) as SymbolDetail;
+  const payload = (await response.json()) as SymbolDetail | { error?: string } | null;
+  if (!payload || typeof payload !== "object" || !("symbol" in payload) || !("impact" in payload)) {
+    throw new Error("symbol endpoint returned an invalid payload");
+  }
+  return payload;
 }
 
 export function moduleById(report: Report, id: string): ReportModule | null {

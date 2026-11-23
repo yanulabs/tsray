@@ -1,0 +1,4 @@
+* text=auto eol=lf
+
+web/dist/report.html linguist-generated=true
+src/render/report-template.generated.ts linguist-generated=true
