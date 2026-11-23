@@ -704,7 +704,9 @@ export function registerMcpTools(
           sync_state: resolvedSummary.state,
           reason: resolvedSummary.reason,
           deps_changed: resolvedSummary.depsChanged,
-          previous_summary: resolvedSummary.previousSummary,
+          previous_summary:
+            resolvedSummary.previousSummary ??
+            (resolvedSummary.state === "soft_stale" ? resolvedSummary.summary : null),
           source: body?.source,
           dependencies: symbolDependencyContext(snapshot, store, symbol.id),
         };
@@ -761,16 +763,15 @@ export function registerMcpTools(
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
-      const coverage = store.getCoverage(snapshot);
       const moduleFilter = stringArg(args, "module");
-      if (!moduleFilter) return jsonResult(coverage);
-      return jsonResult({
-        ...coverage,
-        by_kind: {},
-        by_module: coverage.by_module[moduleFilter]
-          ? { [moduleFilter]: coverage.by_module[moduleFilter] }
-          : {},
-      });
+      if (!moduleFilter) return jsonResult(store.getCoverage(snapshot));
+      const filteredSnapshot: IndexSnapshot = {
+        ...snapshot,
+        symbols: new Map(
+          [...snapshot.symbols].filter(([, symbol]) => symbol.module === moduleFilter)
+        ),
+      };
+      return jsonResult(store.getCoverage(filteredSnapshot));
     }
   );
 

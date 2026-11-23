@@ -468,14 +468,17 @@ export class DualCacheStore {
   }
 
   getStaleness(symbol: SymbolRecord): StalenessState {
-    return this.resolveSummary(symbol).state;
+    return this.resolveSummary(symbol, false).state;
   }
 
   /**
    * Resolves the best cached summary for a symbol and returns the staleness
    * state, previous summary, and whether only dependencies changed.
+   *
+   * Bulk report reads pass `trackAccess: false` so a five-second UI poll does
+   * not write thousands of LRU timestamps.
    */
-  resolveSummary(symbol: SymbolRecord): SummaryState {
+  resolveSummary(symbol: SymbolRecord, trackAccess = true): SummaryState {
     if (!symbol.eligible) {
       return { state: "not_eligible", summary: null, previousSummary: null, depsChanged: false };
     }
@@ -485,7 +488,7 @@ export class DualCacheStore {
       "SELECT summary_json FROM summary_cache WHERE content_hash = ? AND prompt_version = ?"
     ).get(symbol.contentHash, this.promptVersion) as { summary_json: string } | undefined;
     if (exact) {
-      this.touch(symbol.contentHash);
+      if (trackAccess) this.touch(symbol.contentHash);
       return {
         state: "synced",
         summary: parseSummary(exact.summary_json),
@@ -511,7 +514,7 @@ export class DualCacheStore {
     const previousSummary = previous ? parseSummary(previous.summary_json) : null;
 
     if (history.last_self_hash === symbol.selfHash) {
-      this.touch(history.last_content_hash);
+      if (trackAccess) this.touch(history.last_content_hash);
       return {
         state: "soft_stale",
         reason: "deps_changed",
