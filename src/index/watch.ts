@@ -29,10 +29,14 @@ const IGNORED_SEGMENTS = new Set([
 
 export interface IndexControllerStatus {
   index_state: "ready" | "indexing" | "error";
+  /** Timestamp of the snapshot currently served to clients. */
   indexed_at: string | null;
+  served_indexed_at: string | null;
   duration_ms: number;
+  /** Production errors in the latest attempted build (not the served snapshot). */
   prod_errors: number;
   warnings: number;
+  served_prod_errors: number;
   files: number;
   symbols: number;
   edges: number;
@@ -47,6 +51,9 @@ export class IndexController {
   private timer: NodeJS.Timeout | null = null;
   private needsConfigReload = false;
   private lastError: string | null = null;
+  private latestProdErrors = 0;
+  private latestWarnings = 0;
+  private latestAttemptAt: string | null = null;
 
   constructor(
     readonly indexer: TsReactIndexer,
@@ -55,12 +62,21 @@ export class IndexController {
   ) {}
 
   status(): IndexControllerStatus {
+    const state: IndexControllerStatus["index_state"] = this.building
+      ? "indexing"
+      : this.lastError || this.latestProdErrors > 0
+        ? "error"
+        : this.snapshot
+          ? "ready"
+          : "indexing";
     return {
-      index_state: this.building ? "indexing" : this.lastError ? "error" : this.snapshot ? "ready" : "indexing",
-      indexed_at: this.snapshot?.indexedAt ?? null,
+      index_state: state,
+      indexed_at: this.snapshot?.indexedAt ?? this.latestAttemptAt,
+      served_indexed_at: this.snapshot?.indexedAt ?? null,
       duration_ms: this.snapshot?.durationMs ?? 0,
-      prod_errors: this.snapshot?.prodErrors.length ?? 0,
-      warnings: this.snapshot?.warnings.length ?? 0,
+      prod_errors: this.latestProdErrors,
+      warnings: this.latestWarnings,
+      served_prod_errors: this.snapshot?.prodErrors.length ?? 0,
       files: this.snapshot?.filesCount ?? 0,
       symbols: this.snapshot?.symbols.size ?? 0,
       edges: this.snapshot?.edges.length ?? 0,
@@ -74,6 +90,9 @@ export class IndexController {
       try {
         const snapshot = this.indexer.buildIndex(options);
         const healthy = snapshot.prodErrors.length === 0;
+        this.latestProdErrors = snapshot.prodErrors.length;
+        this.latestWarnings = snapshot.warnings.length;
+        this.latestAttemptAt = snapshot.indexedAt;
         if (healthy) {
           this.snapshot = snapshot;
           this.store.syncWorking(snapshot);
@@ -85,7 +104,7 @@ export class IndexController {
           this.log(
             `[tsray] ${snapshot.prodErrors.length} production TypeScript error(s); keeping last healthy snapshot`
           );
-          if (!this.snapshot) this.snapshot = snapshot;
+          if (!this.snapshot || this.snapshot.prodErrors.length > 0) this.snapshot = snapshot;
         }
         return this.snapshot ?? snapshot;
       } catch (error) {

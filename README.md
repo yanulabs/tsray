@@ -121,6 +121,11 @@ The server exposes:
 
 The UI polls every 5 seconds, preserving the active view, filters, selection, and zoom.
 
+When production TypeScript errors appear after a healthy build, `tsray` keeps serving the
+last healthy report snapshot. `project_info.index_state` reports the latest attempt
+(`ready`, `indexing`, or `error`), with `prod_errors` / `current_prod_errors` for the current
+tree and `served_prod_errors` for the snapshot being served.
+
 ### `index`
 
 Builds the index exactly once and syncs `working_symbols`, `working_edges`, and

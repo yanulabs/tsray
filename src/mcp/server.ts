@@ -194,7 +194,8 @@ export async function startServe(
     options.strictPort,
     (busyPort) => logInfo(`Port ${busyPort} is in use, trying another one...`)
   );
-  const url = `http://${options.host}:${port}/`;
+  const urlHost = options.host.includes(":") ? `[${options.host}]` : options.host;
+  const url = `http://${urlHost}:${port}/`;
   if (options.portFile) writePortFile(options.portFile, url);
 
   if (options.logLevel === "info") {
@@ -219,6 +220,7 @@ export async function startServe(
     } catch {
       // Best-effort shutdown.
     }
+    httpServer.closeAllConnections();
     await new Promise<void>((resolve) => httpServer.close(() => resolve()));
     try {
       store.close();

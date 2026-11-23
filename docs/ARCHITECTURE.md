@@ -101,6 +101,9 @@ recomputed.
 
 A snapshot with production TypeScript errors is returned to callers for inspection but is
 never written over a healthy working database. Test/story diagnostics are warnings.
+`IndexController.status()` separates the latest attempt (`prod_errors`, `warnings`,
+`index_state`) from the snapshot being served (`served_indexed_at`, `served_prod_errors`), so
+MCP clients can report a broken working tree while still querying the last good graph.
 
 ## Symbol extraction
 

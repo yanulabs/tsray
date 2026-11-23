@@ -287,6 +287,10 @@ export function registerMcpTools(
       tools: tools.slice(),
       prod_errors: snapshot.prodErrors.slice(0, 20),
       warnings: snapshot.warnings.slice(0, 20),
+      current_prod_errors:
+        controller.status().prod_errors > 0
+          ? controller.indexer.getLastSnapshot()?.prodErrors.slice(0, 20) ?? []
+          : [],
       storage: store.getInfo(),
     });
   });
