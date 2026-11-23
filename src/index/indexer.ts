@@ -913,7 +913,7 @@ export class TsReactIndexer {
         if (ts.isImportDeclaration(statement)) {
           const line = lineOf(sourceFile, statement);
           const specifier = ts.isStringLiteral(statement.moduleSpecifier) ? statement.moduleSpecifier.text : "";
-          if (specifier) addFileImport(sourceFile, specifier, line, statement.importClause?.isTypeOnly ?? false);
+          if (specifier) addFileImport(sourceFile, specifier, line, isTypeOnlyImport(statement));
           if (!statement.importClause) continue;
           const bindings: ts.Node[] = [];
           if (statement.importClause.name) bindings.push(statement.importClause.name);
@@ -939,7 +939,7 @@ export class TsReactIndexer {
               ? statement.moduleSpecifier.text
               : null;
           if (specifier) {
-            addFileImport(sourceFile, specifier, line, statement.isTypeOnly);
+            addFileImport(sourceFile, specifier, line, isTypeOnlyExport(statement));
           }
           if (statement.exportClause && ts.isNamedExports(statement.exportClause)) {
             for (const element of statement.exportClause.elements) {
@@ -1274,6 +1274,28 @@ function hasRequiredMembers(type: ts.Type): boolean {
   const properties = type.getProperties();
   if (properties.length === 0) return false;
   return properties.some((property) => (property.flags & ts.SymbolFlags.Optional) === 0);
+}
+
+function isTypeOnlyImport(node: ts.ImportDeclaration): boolean {
+  if (!node.importClause) return false;
+  if (node.importClause.isTypeOnly) return true;
+  if (node.importClause.name) return false;
+  const bindings = node.importClause.namedBindings;
+  return Boolean(
+    bindings &&
+      ts.isNamedImports(bindings) &&
+      bindings.elements.length > 0 &&
+      bindings.elements.every((element) => element.isTypeOnly)
+  );
+}
+
+function isTypeOnlyExport(node: ts.ExportDeclaration): boolean {
+  if (node.isTypeOnly) return true;
+  if (!node.exportClause || !ts.isNamedExports(node.exportClause)) return false;
+  return (
+    node.exportClause.elements.length > 0 &&
+    node.exportClause.elements.every((element) => element.isTypeOnly)
+  );
 }
 
 function isPublicMember(node: ts.ClassElement): boolean {

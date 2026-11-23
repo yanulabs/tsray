@@ -267,8 +267,10 @@ export class DualCacheStore {
     this.singleMode = paths.singleMode;
     this.promptVersion = options.promptVersion ?? process.env.TSRAY_PROMPT_VERSION ?? "v1";
 
-    if (!this.singleMode) {
+    if (this.workingPath !== ":memory:") {
       fs.mkdirSync(path.dirname(this.workingPath), { recursive: true });
+    }
+    if (!this.singleMode) {
       fs.mkdirSync(path.dirname(this.summaryPath), { recursive: true });
     }
 

@@ -185,6 +185,21 @@ describe("dual SQLite summary cache", () => {
     }
   });
 
+  it("creates parent directories for an explicit database path", () => {
+    const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-cache-"));
+    cleanup.push(directory);
+    const db = path.join(directory, "nested", "cache", "tsray.db");
+    const indexer = new TsReactIndexer(fixture);
+    const snapshot = indexer.buildIndex({ fullDiagnostics: true });
+    const store = new DualCacheStore(snapshot.root, snapshot.projectId, { overrideDb: db });
+    try {
+      expect(fs.existsSync(db)).toBe(true);
+      expect(store.workingPath).toBe(db);
+    } finally {
+      store.close();
+    }
+  });
+
   it("persists summaries in a file-backed single database", () => {
     const directory = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-cache-"));
     cleanup.push(directory);
