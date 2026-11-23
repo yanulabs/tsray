@@ -39,9 +39,23 @@ export async function runCommand(
         })
       : spawn("/bin/sh", ["-c", command], {
           cwd,
+          detached: true,
           env: { ...process.env, NO_COLOR: "1", FORCE_COLOR: "0" },
           stdio: ["ignore", "pipe", "pipe"],
         });
+
+    const terminate = (signal: NodeJS.Signals): void => {
+      if (!child.pid) return;
+      if (!isWindows) {
+        try {
+          process.kill(-child.pid, signal);
+          return;
+        } catch {
+          // Fall back to killing the shell directly.
+        }
+      }
+      child.kill(signal);
+    };
 
     let stdout = "";
     let stderr = "";
@@ -71,8 +85,8 @@ export async function runCommand(
 
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGTERM");
-      setTimeout(() => child.kill("SIGKILL"), 2000).unref();
+      terminate("SIGTERM");
+      setTimeout(() => terminate("SIGKILL"), 2000).unref();
     }, timeoutMs);
     timer.unref();
 
@@ -144,7 +158,11 @@ export function detectTestRunner(root: string, config: TsrayConfig): RunnerComma
 
   if (scripts.test) {
     const script = scripts.test;
-    const suffix = /vitest/.test(script) ? " -- --run" : /jest/.test(script) ? " -- --ci" : "";
+    const suffix = /vitest/.test(script)
+      ? " -- --run"
+      : /jest/.test(script)
+        ? " -- --ci --watchAll=false"
+        : "";
     return {
       available: true,
       command: `${scriptCommand(manager, "test")}${suffix}`,
