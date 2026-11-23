@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>tsray · Architecture Report</title>
+    <script>
+      (() => {
+        try {
+          const stored = localStorage.getItem("tsray-theme");
+          const dark =
+            stored === "dark" ||
+            (stored !== "light" && window.matchMedia("(prefers-color-scheme: dark)").matches);
+          document.documentElement.classList.toggle("dark", dark);
+        } catch {
+          /* localStorage may be unavailable under file:// */
+        }
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script id="tsray-data" type="application/json" data-tsray-live="__TSRAY_LIVE__">__TSRAY_REPORT_DATA__</script>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

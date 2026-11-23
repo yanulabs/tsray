@@ -45,7 +45,7 @@ export function buildReportPayload(snapshot: IndexSnapshot, store: DualCacheStor
     { eligible: number; synced: number; soft: number; hard: number; missing: number }
   >();
   for (const symbol of snapshot.symbols.values()) {
-    const resolved = store.resolveSummary(symbol);
+    const resolved = store.resolveSummary(symbol, false);
     symbolStates.set(symbol.id, {
       state: resolved.state,
       summary: (resolved.summary as ReportSummary | null) ?? null,
@@ -114,6 +114,10 @@ export function buildReportPayload(snapshot: IndexSnapshot, store: DualCacheStor
         props_type: symbol.propsType,
         signature: symbol.signature,
         doc: symbol.doc,
+        sig_hash: symbol.sigHash,
+        self_hash: symbol.selfHash,
+        dep_hash: symbol.depHash,
+        content_hash: symbol.contentHash,
         sync_state: resolved?.state ?? "not_eligible",
         summary: resolved?.summary ?? null,
         callers: [...new Set(incoming.get(symbol.id) ?? [])].sort().slice(0, 100),

@@ -79,8 +79,12 @@ describe("report exporters", () => {
     expect(html).toContain('id="tsray-data"');
     expect(html).toContain('data-tsray-live="false"');
     expect(html).toContain("fixture-react-app");
-    expect(html).not.toContain("__TSRAY_REPORT_DATA__");
+    expect(html).not.toContain(">__TSRAY_REPORT_DATA__</script>");
     expect(html).not.toContain("__TSRAY_LIVE__");
+    const dataScript = /<script id="tsray-data"[^>]*>([\s\S]*?)<\/script>/.exec(html);
+    expect(dataScript).not.toBeNull();
+    const embedded = JSON.parse(dataScript![1]!) as { project: string };
+    expect(embedded.project).toBe("fixture-react-app");
 
     const live = exportHtml(snapshot, store, { live: true });
     expect(live).toContain('data-tsray-live="true"');

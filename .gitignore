@@ -1,7 +1,7 @@
 node_modules/
-dist/
-bin/
-coverage/
+/dist/
+/bin/
+/coverage/
 *.log
 .DS_Store
 .vitest/
@@ -9,4 +9,4 @@ coverage/
 
 # Local tool artifacts
 .tsray/
-report.html
+/report.html

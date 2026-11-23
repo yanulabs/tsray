@@ -36,6 +36,10 @@ export interface ReportSymbol {
   props_type: string | null;
   signature: string;
   doc: string;
+  sig_hash: string;
+  self_hash: string;
+  dep_hash: string;
+  content_hash: string;
   sync_state: ReportSyncState;
   summary: ReportSummary | null;
   callers: string[];
