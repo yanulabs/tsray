@@ -144,5 +144,22 @@ describe("TypeScript/React indexer", () => {
     expect(after.prodErrors).toEqual([]);
     expect(afterApp.selfHash).not.toBe(beforeApp.selfHash);
     expect(extra?.kind).toBe("component");
+
+    // Add a real cross-module cycle and verify that the incremental program
+    // reports it from resolved imports rather than syntax guesses.
+    fs.mkdirSync(path.join(temporary, "src/features/a"), { recursive: true });
+    fs.mkdirSync(path.join(temporary, "src/features/b"), { recursive: true });
+    const aPath = path.join(temporary, "src/features/a/index.ts");
+    const bPath = path.join(temporary, "src/features/b/index.ts");
+    fs.writeFileSync(aPath, 'import { b } from "../b";\nexport function a(): number {\n  return b();\n}\n');
+    fs.writeFileSync(bPath, 'import { a } from "../a";\nexport function b(): number {\n  return a();\n}\n');
+    indexer.notifyFilesChanged([aPath, bPath]);
+    const cyclic = indexer.buildIndex({ fullDiagnostics: false });
+    expect(cyclic.prodErrors).toEqual([]);
+    expect(
+      cyclic.moduleCycles.some(
+        (cycle) => cycle.includes("features/a") && cycle.includes("features/b")
+      )
+    ).toBe(true);
   });
 });

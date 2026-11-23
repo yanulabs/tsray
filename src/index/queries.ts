@@ -495,23 +495,30 @@ export function findImplementations(snapshot: IndexSnapshot, interfaceId?: strin
   }
 
   for (const [targetId, incoming] of graph.incoming) {
+    if (interfaceId && targetId !== interfaceId) continue;
     const target = snapshot.symbols.get(targetId);
     if (target?.kind !== "interface") continue;
     const entry = result.get(targetId) ?? { interface: target, implementations: [] };
+    const bySource = new Map(entry.implementations.map((item) => [item.id, item]));
     for (const edge of incoming) {
       if (edge.kind !== "implements") continue;
       const source = snapshot.symbols.get(edge.fromId);
       if (!source) continue;
-      entry.implementations.push({
+      const via = edge.via ?? "declared";
+      const existing = bySource.get(source.id);
+      // A declared implements/extends edge is stronger than a structural match.
+      if (existing && existing.via !== "structural" && via === "structural") continue;
+      bySource.set(source.id, {
         id: source.id,
         name: source.name,
         kind: source.kind,
         module: source.module,
         file: source.file,
         line: source.line,
-        via: edge.via ?? "declared",
+        via,
       });
     }
+    entry.implementations = [...bySource.values()];
     result.set(targetId, entry);
   }
 
@@ -910,18 +917,26 @@ export function explainDependency(
     const target = snapshot.symbols.get(edge.toId);
     return source?.module === from && target?.module === to && edge.kind !== "imports" && edge.kind !== "re_exports";
   });
-  return {
-    from,
-    to,
-    file_imports: fileImports.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
-    symbol_edges: symbolEdges,
-    symbols: symbolEdges.map((edge) => snapshot.symbols.get(edge.toId)!).filter(Boolean).map((symbol) => ({
+  const seenSymbols = new Set<string>();
+  const symbols: Array<{ id: string; name: string; kind: string; file: string; line: number }> = [];
+  for (const edge of symbolEdges) {
+    const symbol = snapshot.symbols.get(edge.toId);
+    if (!symbol || seenSymbols.has(symbol.id)) continue;
+    seenSymbols.add(symbol.id);
+    symbols.push({
       id: symbol.id,
       name: symbol.name,
       kind: symbol.kind,
       file: symbol.file,
       line: symbol.line,
-    })),
+    });
+  }
+  return {
+    from,
+    to,
+    file_imports: fileImports.sort((a, b) => a.file.localeCompare(b.file) || a.line - b.line),
+    symbol_edges: symbolEdges,
+    symbols,
   };
 }
 
