@@ -94,7 +94,7 @@ export function runArchitecturalDiff(
   const headIndexer = new TsReactIndexer(repoPath, indexerOptions);
   const headSnapshot = headIndexer.buildIndex({ fullDiagnostics: true });
 
-  const gitTop = git(headIndexer.root, ["rev-parse", "--show-toplevel"]);
+  const gitTop = fs.realpathSync(git(headIndexer.root, ["rev-parse", "--show-toplevel"]));
   const headSha = git(gitTop, ["rev-parse", "HEAD"]);
 
   const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-diff-"));

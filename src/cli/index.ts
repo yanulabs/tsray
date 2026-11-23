@@ -34,7 +34,7 @@ Commands:
   diff [base-ref] [path]             Compare the working tree against a git ref
   db <path|info|rm|prune> [path]     Inspect or maintain local SQLite databases
   version                            Print the version
-  help [command]                     Show help
+  help                               Show help
 
 Common options:
   --db <path>                        Single database override (env: TSRAY_DB)
@@ -86,7 +86,7 @@ function boolValue(value: string | boolean | undefined): boolean {
 function storeOptions(values: Record<string, string | boolean | undefined>, indexer: TsReactIndexer): StoreOptions {
   return {
     overrideDb: stringValue(values.db) ?? process.env.TSRAY_DB,
-    promptVersion: indexer.config.summaries.promptVersion,
+    promptVersion: process.env.TSRAY_PROMPT_VERSION ?? indexer.config.summaries.promptVersion,
   };
 }
 
@@ -180,11 +180,21 @@ async function main(): Promise<void> {
       process.stderr.write(`${message}\n`);
     };
     const controller = new IndexController(indexer, store, log);
+    const port = Number(stringValue(values.port) ?? process.env.TSRAY_PORT ?? "4321");
+    const portRange = Number(stringValue(values["port-range"]) ?? process.env.TSRAY_PORT_RANGE ?? "100");
+    if (!Number.isInteger(port) || port < 0 || port > 65535) {
+      store.close();
+      throw new UsageError(`Invalid port: ${String(values.port ?? process.env.TSRAY_PORT)}`);
+    }
+    if (!Number.isInteger(portRange) || portRange < 0) {
+      store.close();
+      throw new UsageError(`Invalid port range: ${String(values["port-range"] ?? process.env.TSRAY_PORT_RANGE)}`);
+    }
     try {
       await startServe(controller, store, {
         host: stringValue(values.host) ?? process.env.TSRAY_HOST ?? "127.0.0.1",
-        port: Number(stringValue(values.port) ?? process.env.TSRAY_PORT ?? "4321"),
-        portRange: Number(stringValue(values["port-range"]) ?? process.env.TSRAY_PORT_RANGE ?? "100"),
+        port,
+        portRange,
         strictPort:
           boolValue(values["strict-port"]) || process.env.TSRAY_STRICT_PORT === "true",
         watch: !boolValue(values["no-watch"]),
@@ -272,7 +282,8 @@ async function main(): Promise<void> {
       const snapshot = indexer.buildIndex({ fullDiagnostics: true });
       let content: string;
       const scope = (stringValue(values.scope) as "module" | "file" | "symbol" | undefined) ?? "module";
-      const depth = Number(stringValue(values.depth) ?? "2");
+      const depthValue = Number(stringValue(values.depth) ?? "2");
+      const depth = Number.isFinite(depthValue) && depthValue > 0 ? depthValue : 2;
       const root = stringValue(values.root);
       switch (format) {
         case "html":
@@ -425,8 +436,9 @@ function slug(value: string): string {
 }
 
 main().catch((error) => {
-  if (error instanceof UsageError) {
-    process.stderr.write(`[tsray] ${error.message}\n`);
+  const code = error && typeof error === "object" && "code" in error ? String((error as { code: unknown }).code) : "";
+  if (error instanceof UsageError || code.startsWith("ERR_PARSE_ARGS")) {
+    process.stderr.write(`[tsray] ${error instanceof Error ? error.message : String(error)}\n`);
     process.exitCode = 2;
     return;
   }
