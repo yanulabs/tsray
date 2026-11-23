@@ -94,8 +94,8 @@ export class IndexController {
         this.latestWarnings = snapshot.warnings.length;
         this.latestAttemptAt = snapshot.indexedAt;
         if (healthy) {
-          this.snapshot = snapshot;
           this.store.syncWorking(snapshot);
+          this.snapshot = snapshot;
           this.lastError = null;
           this.log(
             `[tsray] indexed ${snapshot.symbols.size} symbols / ${snapshot.edges.length} edges in ${snapshot.durationMs}ms`

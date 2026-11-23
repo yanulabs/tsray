@@ -127,6 +127,18 @@ describe("MCP tool surface", () => {
       const coverage = await client.callTool({ name: "get_summary_coverage", arguments: {} });
       const coverageJson = JSON.parse(textOf(coverage)) as { synced: number };
       expect(coverageJson.synced).toBe(1);
+
+      const moduleCoverage = await client.callTool({
+        name: "get_summary_coverage",
+        arguments: { module: "components" },
+      });
+      const moduleJson = JSON.parse(textOf(moduleCoverage)) as {
+        synced: number;
+        by_module: Record<string, unknown>;
+      };
+      expect(moduleJson.synced).toBe(1);
+      expect(moduleJson.by_module.components).toBeDefined();
+      expect(moduleJson.by_module.root).toBeUndefined();
     } finally {
       await server.close();
       await client.close();

@@ -391,13 +391,18 @@ export function registerMcpTools(
     {
       from: z.string(),
       to: z.string(),
+      include_tests: z.boolean().default(false),
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const from = stringArg(args, "from");
       const to = stringArg(args, "to");
       if (!from || !to) return errorResult({ error: "from_and_to_required" });
-      return jsonResult(explainDependency(snapshot, from, to));
+      return jsonResult(
+        explainDependency(snapshot, from, to, {
+          includeTests: boolArg(args, "include_tests", false),
+        })
+      );
     }
   );
 
@@ -832,6 +837,7 @@ export function registerMcpTools(
       modules: snapshot.modules.length,
       prod_errors: snapshot.prodErrors.length,
       warnings: snapshot.warnings.length,
+      index_state: controller.status(),
       storage: store.getInfo(),
     });
   });

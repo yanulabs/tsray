@@ -147,11 +147,12 @@ export async function startServe(
           response.end(JSON.stringify({ error: "id_required" }));
           return;
         }
-        response.writeHead(200, {
+        const payload = symbolPayload(snapshot, id);
+        response.writeHead("error" in payload ? 404 : 200, {
           "content-type": "application/json; charset=utf-8",
           "cache-control": "no-store",
         });
-        response.end(JSON.stringify(symbolPayload(snapshot, id)));
+        response.end(JSON.stringify(payload));
         return;
       }
 
@@ -198,7 +199,7 @@ export async function startServe(
   const url = `http://${urlHost}:${port}/`;
   if (options.portFile) writePortFile(options.portFile, url);
 
-  if (options.logLevel === "info") {
+  if (options.logLevel !== "off") {
     process.stderr.write(
       `\n  tsray dev\n\n  -> Local:   ${url}\n  -> MCP:     stdio\n  -> Report:  ${url}api/report\n\n  TSRAY_REPORT_URL=${url}\n\n`
     );
@@ -208,7 +209,13 @@ export async function startServe(
   const mcp = new McpServer({ name: "tsray", version: VERSION });
   registerMcpTools(mcp, controller, store);
   const transport = new StdioServerTransport();
-  await mcp.connect(transport);
+  try {
+    await mcp.connect(transport);
+  } catch (error) {
+    httpServer.closeAllConnections();
+    httpServer.close();
+    throw error;
+  }
 
   let shuttingDown = false;
   const shutdown = async (): Promise<void> => {
