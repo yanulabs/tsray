@@ -3,7 +3,7 @@ import tseslint from "typescript-eslint";
 
 export default tseslint.config(
   {
-    ignores: ["dist/**", "node_modules/**", "web/**", "bin/**", "coverage/**"],
+    ignores: ["dist/**", "node_modules/**", "web/**", "bin/**", "coverage/**", "test/fixtures/**"],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,
@@ -11,7 +11,7 @@ export default tseslint.config(
     files: ["**/*.ts"],
     languageOptions: {
       parserOptions: {
-        projectService: true,
+        project: ["./tsconfig.json", "./tsconfig.test.json"],
         tsconfigRootDir: import.meta.dirname,
       },
     },
