@@ -218,9 +218,10 @@ export async function startServe(
   }
 
   let shuttingDown = false;
-  const shutdown = async (): Promise<void> => {
+  const shutdown = async (exitCode = 0): Promise<void> => {
     if (shuttingDown) return;
     shuttingDown = true;
+    setTimeout(() => process.exit(exitCode), 4000).unref();
     try {
       await controller.stop();
       await mcp.close();
@@ -241,18 +242,18 @@ export async function startServe(
         // Ignore cleanup failures.
       }
     }
-    process.exit(0);
+    process.exit(exitCode);
   };
 
   process.on("SIGINT", () => {
-    void shutdown();
+    void shutdown(0);
   });
   process.on("SIGTERM", () => {
-    void shutdown();
+    void shutdown(0);
   });
   process.on("uncaughtException", (error) => {
     logError(`[tsray] uncaught exception: ${error.stack ?? String(error)}`);
-    void shutdown();
+    void shutdown(1);
   });
   process.on("unhandledRejection", (reason) => {
     logError(`[tsray] unhandled rejection: ${String(reason)}`);

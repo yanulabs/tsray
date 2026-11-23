@@ -293,7 +293,12 @@ export function diffMarkdown(result: DiffResult): string {
         `- \`${item.name}\` complexity ${item.complexity}, risk ${item.risk_score} at \`${item.file}:${item.line}\``
     ),
   ];
-  if (result.new_cycles.length === 0 && result.new_dead_code.length === 0) {
+  if (
+    result.new_cycles.length === 0 &&
+    result.new_dead_code.length === 0 &&
+    result.breaking_api.length === 0 &&
+    result.new_untested_hotspots.length === 0
+  ) {
     lines.push("", "No new architectural regressions detected.");
   }
   return `${lines.join("\n")}\n`;
