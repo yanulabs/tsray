@@ -210,9 +210,9 @@ exported code. Framework route files are roots via the entrypoint pattern set.
 ## Module graph and cycles
 
 `fileImports` is produced by `ts.resolveModuleName` for static imports, re-exports, and
-literal dynamic imports. Production test-file imports are excluded from architecture cycles;
-test import sites remain available for other analyses. Module edges aggregate file imports
-and cross-module symbol edges. Cycles are SCCs of size > 1.
+literal dynamic imports. Production test-file imports and erased `import type` edges are
+excluded from runtime cycle detection; both remain available for navigation. Module edges
+aggregate file imports and cross-module symbol edges. Cycles are SCCs of size > 1.
 
 ## SQLite model
 

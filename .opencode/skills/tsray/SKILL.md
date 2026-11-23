@@ -45,8 +45,9 @@ Anti-patterns:
 3. Check `index_state`:
    - `ready`: use the snapshot.
    - `indexing`: retry shortly; the server may serve the last healthy snapshot.
-   - `error`: inspect `prod_errors`; production TypeScript errors keep the last healthy
-     snapshot on disk. Test-only errors are warnings.
+   - `error`: inspect `current_prod_errors` for the latest working-tree errors and
+     `prod_errors` for the snapshot being served. Production TypeScript errors keep the last
+     healthy snapshot on disk; test-only errors are warnings.
 
 `project_info` also reports tsconfig paths, workspace mode, TypeScript version, DB paths,
 summary prompt version, and the registered tool list.
@@ -59,7 +60,7 @@ summary prompt version, and the registered tool list.
 | `get_codebase_map` | `format` (`md` default, `json`, `dot`, `mermaid`), `top_modules` (`0` = all), `sort_by` (`loc`, `symbols`, `fan_in`, `fan_out`, `name`), `detail`, `summary_only`. |
 | `get_module_overview` | `module` (required), `format` (`json` default, `md`). Files, dependencies, hotspots. |
 | `get_dependency_graph` | `format` (`json`, `dot`, `mermaid`), `scope` (`module` default, `file`), `root`, `depth` (1-10), `direction` (`out`, `in`, `both`). |
-| `explain_dependency` | `from` and `to` module names. Exact file imports and symbol edges. |
+| `explain_dependency` | `from` and `to` module names, `include_tests` (default false). Exact file imports and symbol edges. |
 | `lookup_symbol` | `query` (canonical ID, name, file, fuzzy), `limit` (default 10). Returns hashes and staleness. |
 | `get_api_surface` | `module`, `kind`, `limit` (0 = unlimited), `offset`. |
 | `get_references` | `symbol_id` (or `symbolId`), `include_imports` (default false), `limit`. |

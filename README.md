@@ -27,6 +27,9 @@ implements this interface", or "which hook does this component call through a pa
 - npm 10+ (or pnpm/bun for development)
 - A project with `tsconfig.json` (project references and pnpm/npm workspaces are supported)
 
+Node 22 prints an `ExperimentalWarning` for `node:sqlite`; it is harmless. Set
+`NODE_NO_WARNINGS=1` if you need completely quiet stderr.
+
 ## Install and build
 
 ```sh
@@ -86,7 +89,7 @@ Commands:
   diff [base-ref] [path]             Compare the working tree against a git ref
   db <path|info|rm|prune> [path]
   version
-  help [command]
+  help
 ```
 
 ### `serve`
@@ -99,6 +102,7 @@ tsray serve [path] [--db <path>] [--host <addr>] [--port <n>] \
 
 - `--db <path>` — single-database override; env `TSRAY_DB`; `:memory:` is supported.
 - `--host` — bind address (default `127.0.0.1`). Binding beyond loopback prints a warning.
+  The report API has no authentication; keep it on loopback unless you trust the network.
 - `--port` — preferred report port (default `4321`; env `TSRAY_PORT`; `0` = OS-assigned).
 - `--port-range` — fallback window after the preferred port (default `100`).
 - `--strict-port` — fail instead of moving when the preferred port is busy.
@@ -213,6 +217,9 @@ OpenCode V2 reads servers from `mcp.servers`:
 
 The server resolves the active workspace automatically. Pin a repository by appending its
 path to the command.
+
+The repository ships an OpenCode skill at `.opencode/skills/tsray/SKILL.md` with tool routing,
+canonical-ID, and summary-workflow guidance.
 
 ### Claude Code
 
@@ -463,6 +470,7 @@ then biome or eslint configs.
 | `TSRAY_STRICT_PORT` | `true` to require the preferred port |
 | `TSRAY_PORT_FILE` | Port file path |
 | `TSRAY_LOG_LEVEL` | `off`, `error`, `info` |
+| `TSRAY_REPORT_URL` | Written to stderr by `serve` so a dev proxy can follow a moved port |
 | `TSRAY_DEV_API` | Vite dev proxy target (web development only) |
 | `TSRAY_DEBUG` | Print stack traces from CLI failures |
 
@@ -486,9 +494,10 @@ chokidar watcher.
 npm run build:bin    # bun build ./src/cli/index.ts --compile --outfile ./bin/tsray
 ```
 
-Bun must support the `node:sqlite` compatibility module. If your Bun build does not, replace
-the import in `src/cache/store.ts` with `bun:sqlite` (same `DatabaseSync` API) before
-compiling. The report template is embedded, so the binary needs no runtime web files.
+Bun must support the `node:sqlite` compatibility module. If your Bun build does not, adapt
+`src/cache/store.ts` to `bun:sqlite` (`import { Database }` and `new Database(path)` instead
+of `DatabaseSync`; the `prepare`/`run`/`get`/`all`/`exec` calls used here are equivalent).
+The report template is embedded, so the binary needs no runtime web files.
 
 ## Layout
 
@@ -511,6 +520,9 @@ scripts/      report embedding
 - One merged LanguageService program is built for the root project plus referenced/workspace
   tsconfigs. Per-package `paths` aliases are merged into the root options; unusual aliases
   that collide across workspace packages may need `--workspace` or a dedicated tsconfig.
+- When a single package references sibling source projects, those files are used for type
+  resolution but only files under the resolved project root are indexed. Use `--workspace`
+  to index the whole graph.
 - Structural interface matching is intentionally broader than nominal `implements` checks;
   review `via: "structural"` edges when they appear noisy.
 - Sources are indexed, not bundled. Runtime-only dynamic imports and non-literal module
