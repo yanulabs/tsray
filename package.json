@@ -1,0 +1,43 @@
+{
+  "name": "tsray",
+  "version": "0.1.0",
+  "description": "Semantic TypeScript/React indexer, MCP server, and offline architecture reporter",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "bin": {
+    "tsray": "./dist/cli/index.js"
+  },
+  "files": [
+    "dist",
+    "web/dist/report.html",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "build:web": "npm --prefix web run build && node scripts/embed-report.mjs",
+    "build:bin": "bun build ./src/cli/index.ts --compile --outfile ./bin/tsray",
+    "dev": "node --watch dist/cli/index.js serve",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint src test --max-warnings 0",
+    "verify": "npm run typecheck && npm run test"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.32.2",
+    "chokidar": "^4.0.3",
+    "typescript": "^5.9.3",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.13.0",
+    "eslint": "^10.15.0",
+    "typescript-eslint": "^8.74.0",
+    "vitest": "^5.1.1"
+  }
+}

@@ -1,0 +1,12 @@
+node_modules/
+dist/
+bin/
+coverage/
+*.log
+.DS_Store
+.vitest/
+*.tsbuildinfo
+
+# Local tool artifacts
+.tsray/
+report.html
