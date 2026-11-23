@@ -389,10 +389,7 @@ export function exportDot(snapshot: IndexSnapshot, options: GraphExportOptions =
     if (!options.root) throw new Error("Symbol graph export requires --root <symbol-id>");
     const graph = getCallGraph(snapshot, options.root, {
       depth: options.depth ?? 2,
-      direction:
-        options.direction === "callers" || options.direction === "callees"
-          ? options.direction
-          : "both",
+      direction: symbolGraphDirection(options.direction),
     });
     for (const node of graph.nodes) {
       const symbol = snapshot.symbols.get(node.id);
@@ -434,10 +431,7 @@ export function exportMermaid(snapshot: IndexSnapshot, options: GraphExportOptio
     if (!options.root) throw new Error("Symbol graph export requires --root <symbol-id>");
     const graph = getCallGraph(snapshot, options.root, {
       depth: options.depth ?? 2,
-      direction:
-        options.direction === "callers" || options.direction === "callees"
-          ? options.direction
-          : "both",
+      direction: symbolGraphDirection(options.direction),
     });
     const lines = ["flowchart LR"];
     const ids = new Map<string, string>();
@@ -544,12 +538,24 @@ function injectReport(template: string, json: string, live: boolean): string {
   throw new Error("Report template is missing the tsray-data script tag");
 }
 
+function symbolGraphDirection(
+  direction: GraphExportOptions["direction"]
+): "callers" | "callees" | "both" {
+  if (direction === "callers" || direction === "in") return "callers";
+  if (direction === "callees" || direction === "out") return "callees";
+  return "both";
+}
+
 function escapeDot(value: string): string {
   return value.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
 }
 
 function escapeMermaid(value: string): string {
-  return value.replace(/"/g, "&quot;").replace(/[[\]{}]/g, "");
+  return value
+    .replace(/"/g, "&quot;")
+    .replace(/\|/g, "&#124;")
+    .replace(/`/g, "&#96;")
+    .replace(/[[\]{}]/g, "");
 }
 
 const FALLBACK_TEMPLATE = `<!doctype html>
