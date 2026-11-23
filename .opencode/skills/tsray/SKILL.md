@@ -1,0 +1,186 @@
+---
+name: tsray
+description: Deterministic TypeScript/React semantic code intelligence via the TypeScript Compiler API. Use for TypeScript/React codebase navigation, architecture overview, symbol lookup, references, callers, React render/component/context graphs, interface implementations, change impact, untested complexity hotspots, dead code, test/typecheck/lint execution, and structured summary caching. Strictly takes precedence over semantic/vector search (cocoindex-code / ccc) and grep for any known TypeScript symbol or React structure when the tsray MCP server is connected.
+---
+
+# tsray
+
+In OpenCode, tools are named `tsray_<tool>` directly or live under `tools.tsray.*` in Code
+Mode.
+
+## Tool routing & precedence (overrides `ccc` / `cocoindex-code` and `grep`)
+
+1. **NEVER use vector/embedding search for a known TypeScript identifier** (component, hook,
+   context, function, method, class, interface, type, enum, variable). Vector search is
+   probabilistic and misses type aliases, barrel re-exports, and interface implementations;
+   `tsray` is compiler-exact (`ts.LanguageService` + `ts.TypeChecker`).
+2. **NEVER search to discover the project's module architecture or tsray tool names.** Call
+   `tsray` tools directly from the list below.
+3. **Use `ccc`/vector search only for:**
+   - non-TypeScript files (SQL, YAML, Dockerfiles, Markdown, configs, Go, Rust);
+   - conceptual discovery when you do not know any symbol name yet. Switch to `tsray` as
+     soon as you have one.
+4. **Use `rg` / direct file reads for:** literal strings, comments, error text, JSX copy, or
+   exact lines immediately before editing.
+
+Anti-patterns:
+
+- **WRONG:** `ccc.search(query="Button component render tree")`
+  **RIGHT:** `lookup_symbol(query="Button")` + `get_component_tree(symbol_id=...)`
+- **WRONG:** `rg "ThemeContext"` to find consumers
+  **RIGHT:** `get_references(symbol_id="sym:src/theme.tsx#ThemeContext")` +
+  `get_impact_analysis(symbol_id=...)`
+- **WRONG:** `rg "export .* from './Button'"` to understand a barrel
+  **RIGHT:** `explain_dependency(from="components", to="root")` and `get_dependency_graph`.
+
+## Connection check
+
+1. Call `project_info` (batch it with `get_codebase_map` for initial orientation).
+2. If tools are missing, ask the user to register the stdio server:
+
+   ```sh
+   claude mcp add --scope user tsray -- node /absolute/path/to/tsray/dist/cli/index.js serve
+   ```
+
+3. Check `index_state`:
+   - `ready`: use the snapshot.
+   - `indexing`: retry shortly; the server may serve the last healthy snapshot.
+   - `error`: inspect `prod_errors`; production TypeScript errors keep the last healthy
+     snapshot on disk. Test-only errors are warnings.
+
+`project_info` also reports tsconfig paths, workspace mode, TypeScript version, DB paths,
+summary prompt version, and the registered tool list.
+
+## Tool catalog
+
+| Tool | Parameters |
+|---|---|
+| `project_info` | none. Readiness, counts, tsconfig paths, DB paths, diagnostics. |
+| `get_codebase_map` | `format` (`md` default, `json`, `dot`, `mermaid`), `top_modules` (`0` = all), `sort_by` (`loc`, `symbols`, `fan_in`, `fan_out`, `name`), `detail`, `summary_only`. |
+| `get_module_overview` | `module` (required), `format` (`json` default, `md`). Files, dependencies, hotspots. |
+| `get_dependency_graph` | `format` (`json`, `dot`, `mermaid`), `scope` (`module` default, `file`), `root`, `depth` (1-10), `direction` (`out`, `in`, `both`). |
+| `explain_dependency` | `from` and `to` module names. Exact file imports and symbol edges. |
+| `lookup_symbol` | `query` (canonical ID, name, file, fuzzy), `limit` (default 10). Returns hashes and staleness. |
+| `get_api_surface` | `module`, `kind`, `limit` (0 = unlimited), `offset`. |
+| `get_references` | `symbol_id` (or `symbolId`), `include_imports` (default false), `limit`. |
+| `get_call_graph` | `symbol_id`, `depth` (1-6), `direction` (`callers`, `callees`, `both`). |
+| `get_component_tree` | `symbol_id`, `depth`, `direction` (`children`, `parents`, `both`). React renders, hooks, contexts, wrappers. |
+| `find_implementations` | `symbol_id` optional; omit for the full interface matrix. |
+| `get_impact_analysis` | `symbol_id`, `max_depth` (default 4). Blast radius and suggested commands. |
+| `get_dead_code` | `include_exported` (default false), `module`, `kind`, `group_by` (`none`, `module`, `kind`), `limit`. |
+| `get_hotspots` | `limit`, `module`, `untested_only`, `min_complexity`, `sort_by` (`risk`, `complexity`, `loc`, `fan_in`). |
+| `get_function_body` | `symbol_id`. Source, LOC, complexity. |
+| `list_stale_summaries` | `limit`, `module`, `kind`. Missing/soft/hard stale summaries. |
+| `get_summary_context` | `symbol_ids` (batched, max 25) or `symbol_id`, `include_source`. Schema, hashes, source, dependencies. |
+| `upsert_summaries` | `entries` array: `symbol_id`, `summary`, `expected_content_hash` (or self+dep hashes), `model_id`. |
+| `get_summary_coverage` | `module` optional. |
+| `run_tests` | `timeout_seconds`. Detects package script, vitest, or jest. |
+| `run_typecheck` | `timeout_seconds`. Package script or local `tsc --noEmit`. |
+| `run_lint` | `timeout_seconds`. Package script, eslint, or biome. |
+| `reindex` | `full_diagnostics` (default true). Force a synchronous rebuild. |
+
+JSON fields are snake_case. Symbol arguments accept either `symbol_id` or `symbolId`.
+
+## Canonical IDs
+
+```text
+sym:src/components/Button.tsx#Button
+sym:src/components/Button.tsx:Widget#render
+file:src/components/Button.tsx
+```
+
+IDs are line-independent. Use `lookup_symbol` when you do not know the canonical ID.
+
+## Navigation & audit
+
+- Architecture: `get_codebase_map`, `get_module_overview`, `get_dependency_graph`,
+  `explain_dependency`.
+- Find code: `lookup_symbol`.
+- Understand calls: `get_references`, `get_call_graph`, `get_function_body`.
+- React structure: `get_component_tree` (renders, HOC wrappers, hooks, providers/consumers).
+- Contracts: `find_implementations` (nominal plus structural matches; check `via`).
+- Change risk: `get_impact_analysis` before editing an exported symbol or context.
+- Complexity gaps: `get_hotspots` with `untested_only: true`.
+- Unused code: `get_dead_code`. Framework route files are exempted automatically.
+- Public API: `get_api_surface`.
+
+Before refactoring a symbol, run `lookup_symbol` -> `get_impact_analysis` (plus
+`find_implementations` for interfaces/contracts) before reading or editing files.
+
+## Summary workflow
+
+The server never generates prose. The client generates summaries.
+
+1. List candidates:
+   ```json
+   {"kind":"component","limit":25}
+   ```
+   via `list_stale_summaries`.
+2. Fetch context:
+   ```json
+   {"symbol_ids":["sym:src/App.tsx#App"],"include_source":true}
+   ```
+   Responses include the exact schema, hashes, staleness, previous summary, source, and
+   dependencies.
+3. Build the summary using the returned schema. Do not add fields.
+   Callable (component, hook, function, method):
+   ```json
+   {
+     "intent": "Why this exists and its architectural role.",
+     "side_effects": ["none"],
+     "invariants": ["Label is rendered as-is"]
+   }
+   ```
+   Type-like (interface, type, class, context, enum, variable):
+   ```json
+   {
+     "intent": "Architectural responsibility.",
+     "key_invariants": ["Single provider per tree"],
+     "boundaries": ["client-only"]
+   }
+   ```
+4. Upsert with hashes:
+   ```json
+   {
+     "entries": [{
+       "symbol_id": "sym:src/App.tsx#App",
+       "summary": {"intent": "...", "side_effects": ["renders_children"], "invariants": []},
+       "expected_content_hash": "...",
+       "model_id": "your-model-id"
+     }]
+   }
+   ```
+5. Handle statuses:
+   - `updated`: stored.
+   - `hash_mismatch`: source or dependencies changed; re-fetch context.
+   - `validation_error`: fix the schema.
+   - `not_eligible`: test/story/generated symbols cannot be summarized.
+   - `not_found`: symbol disappeared after a rebuild.
+6. Check `get_summary_coverage` after batches.
+
+## Staleness rules
+
+- `synced`: exact content hash hit.
+- `soft_stale`: code unchanged, dependencies changed; previous summary is reusable.
+- `hard_stale`: the symbol changed; previous summary is only a baseline.
+- `missing`: never summarized.
+- `not_eligible`: do not summarize.
+
+## Practical rules
+
+- Do not edit source files to store summaries.
+- Do not invent canonical IDs.
+- Prefer `tsray` over shell tools for TypeScript/React structure; use shell tools for
+  formatting, running arbitrary commands, and non-code files.
+- Use `run_tests`, `run_typecheck`, and `run_lint` when available; they respect the project's
+  package manager and scripts.
+- Prefer automatic incremental rebuilds. Call `reindex` after a branch switch or dependency
+  upgrade.
+- Generate the offline report with:
+  ```sh
+  tsray export html /path/to/project -o report.html
+  ```
+- CI gate:
+  ```sh
+  tsray diff main /path/to/project --fail-on cycles,breaking_api,untested_hotspots
+  ```
