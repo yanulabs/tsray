@@ -70,6 +70,10 @@ describe("report exporters", () => {
     const mermaid = exportMermaid(snapshot, { scope: "module" });
     expect(mermaid).toContain("flowchart LR");
     expect(mermaid).toContain("root");
+
+    const symbolMermaid = exportMermaid(snapshot, { scope: "symbol", root: app.id, depth: 2 });
+    expect(symbolMermaid).toContain("Button");
+    expect(symbolMermaid).toContain("renders");
   });
 
   it("injects the payload into the single-file HTML report", () => {

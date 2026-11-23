@@ -430,6 +430,30 @@ export function exportDot(snapshot: IndexSnapshot, options: GraphExportOptions =
 }
 
 export function exportMermaid(snapshot: IndexSnapshot, options: GraphExportOptions = {}): string {
+  if (options.scope === "symbol") {
+    if (!options.root) throw new Error("Symbol graph export requires --root <symbol-id>");
+    const graph = getCallGraph(snapshot, options.root, {
+      depth: options.depth ?? 2,
+      direction:
+        options.direction === "callers" || options.direction === "callees"
+          ? options.direction
+          : "both",
+    });
+    const lines = ["flowchart LR"];
+    const ids = new Map<string, string>();
+    graph.nodes.forEach((node, index) => {
+      const id = `n${index}`;
+      ids.set(node.id, id);
+      lines.push(`  ${id}["${escapeMermaid(node.name)}<br/>${escapeMermaid(node.kind)}"]`);
+    });
+    for (const edge of graph.edges) {
+      const from = ids.get(edge.from);
+      const to = ids.get(edge.to);
+      if (from && to) lines.push(`  ${from} -->|${escapeMermaid(edge.kind)}| ${to}`);
+    }
+    return `${lines.join("\n")}\n`;
+  }
+
   const scope = options.scope === "file" ? "file" : "module";
   const graph = getDependencyGraph(snapshot, {
     scope,
