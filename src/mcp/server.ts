@@ -33,7 +33,8 @@ async function listenWithFallback(
   host: string,
   startPort: number,
   range: number,
-  strictPort: boolean
+  strictPort: boolean,
+  onBusy: (port: number) => void
 ): Promise<{ port: number; tried: number[] }> {
   if (startPort === 0) {
     await listenOnce(server, host, 0);
@@ -55,7 +56,7 @@ async function listenWithFallback(
         }
         throw error;
       }
-      process.stderr.write(`Port ${port} is in use, trying another one...\n`);
+      onBusy(port);
     }
   }
   throw new Error(`No free port in range ${startPort}-${maxPort}`);
@@ -107,6 +108,9 @@ export async function startServe(
   const logError = (message: string): void => {
     if (options.logLevel !== "off") process.stderr.write(`${message}\n`);
   };
+  const logInfo = (message: string): void => {
+    if (options.logLevel === "info") process.stderr.write(`${message}\n`);
+  };
 
   // Start indexing immediately; the report endpoint waits for the first
   // healthy snapshot while MCP clients can query project_info meanwhile.
@@ -122,8 +126,8 @@ export async function startServe(
   }
 
   const httpServer = http.createServer(async (request, response) => {
-    const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
     try {
+      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
       if (url.pathname === "/api/report") {
         const snapshot = await controller.getSnapshot();
         const payload = buildReportPayload(snapshot, store);
@@ -187,7 +191,8 @@ export async function startServe(
     options.host,
     options.port,
     options.portRange,
-    options.strictPort
+    options.strictPort,
+    (busyPort) => logInfo(`Port ${busyPort} is in use, trying another one...`)
   );
   const url = `http://${options.host}:${port}/`;
   if (options.portFile) writePortFile(options.portFile, url);

@@ -36,6 +36,7 @@ export interface IndexControllerStatus {
   files: number;
   symbols: number;
   edges: number;
+  last_error: string | null;
 }
 
 export class IndexController {
@@ -63,6 +64,7 @@ export class IndexController {
       files: this.snapshot?.filesCount ?? 0,
       symbols: this.snapshot?.symbols.size ?? 0,
       edges: this.snapshot?.edges.length ?? 0,
+      last_error: this.lastError,
     };
   }
 
