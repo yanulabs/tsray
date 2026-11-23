@@ -253,19 +253,30 @@ export function readPackageEntrypoints(root: string): string[] {
   visit(pkg.module);
   visit(pkg.bin);
 
-  const patterns: string[] = [];
+  const patterns = new Set<string>();
+  const addCandidate = (relative: string): void => {
+    if (!relative || relative.startsWith("..") || relative.includes("*")) return;
+    const declarationStripped = relative.replace(/\.d\.(mts|cts|ts)$/, "");
+    const withoutExtension = declarationStripped.replace(/\.(mjs|cjs|js|jsx|mts|cts|ts|tsx)$/, "");
+    const extensionPattern = `${withoutExtension}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}`;
+    const candidatesToCheck = [relative, extensionPattern];
+    for (const candidateToCheck of candidatesToCheck) {
+      if (!candidateToCheck.includes("*") && fs.existsSync(path.join(root, candidateToCheck))) {
+        patterns.add(toPosix(candidateToCheck));
+      }
+    }
+    patterns.add(extensionPattern);
+  };
+
   for (const candidate of candidates) {
     const clean = toPosix(candidate).replace(/^\.\//, "");
     if (!clean || clean.includes("*")) continue;
-    const absolute = path.resolve(root, clean);
-    const relative = toPosix(path.relative(root, absolute));
-    if (relative.startsWith("..")) continue;
-    if (isSourceFile(relative)) {
-      patterns.push(relative);
-      continue;
+    addCandidate(clean);
+    // Built packages publish dist/ or lib/; map those entrypoints back to src/
+    // so library entrypoints stay alive in dead-code analysis.
+    for (const prefix of ["dist/", "lib/", "build/"]) {
+      if (clean.startsWith(prefix)) addCandidate(`src/${clean.slice(prefix.length)}`);
     }
-    const withoutExtension = relative.replace(/\.(mjs|cjs|js|mts|cts)$/, "");
-    patterns.push(`${withoutExtension}.{ts,tsx,mts,cts,js,jsx,mjs,cjs}`);
   }
-  return patterns;
+  return [...patterns];
 }

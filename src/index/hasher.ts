@@ -49,11 +49,9 @@ export function computeGraphHashes(symbols: Map<string, SymbolRecord>, edges: Ed
     adjacency.get(edge.fromId)!.add(edge.toId);
   }
 
+  // Tarjan emits SCCs dependency-first, which lets us compute content hashes
+  // in a single pass without reversing the condensation graph.
   const components = stronglyConnectedComponents(adjacency);
-  // SCCs are returned in condensation-source order, so reverse them to visit
-  // dependencies before their callers.
-  components.reverse();
-
   const contentHashes = new Map<string, string>();
   for (const component of components) {
     const componentSet = new Set(component);
@@ -106,66 +104,73 @@ export function findDirectedCycles(
     .sort((a, b) => a.join(",").localeCompare(b.join(",")));
 }
 
+interface TarjanFrame {
+  id: string;
+  neighbors: Iterator<string>;
+  parent: string | null;
+}
+
 /**
- * Iterative Kosaraju SCC decomposition. The returned components are in
- * topological order of the condensation: upstream components first.
+ * Iterative Tarjan SCC decomposition. The returned components are dependency
+ * first: every callee SCC is emitted before the SCC that references it.
+ * Iteration avoids call-stack limits on large React applications.
  */
 export function stronglyConnectedComponents(
   adjacency: ReadonlyMap<string, ReadonlySet<string>>
 ): string[][] {
-  const order: string[] = [];
-  const visited = new Set<string>();
+  let index = 0;
+  const indices = new Map<string, number>();
+  const lowlink = new Map<string, number>();
+  const onStack = new Set<string>();
+  const stack: string[] = [];
+  const components: string[][] = [];
+
+  const enter = (id: string, parent: string | null, frames: TarjanFrame[]): void => {
+    indices.set(id, index);
+    lowlink.set(id, index);
+    index++;
+    stack.push(id);
+    onStack.add(id);
+    frames.push({
+      id,
+      neighbors: (adjacency.get(id) ?? new Set<string>()).values(),
+      parent,
+    });
+  };
 
   for (const start of adjacency.keys()) {
-    if (visited.has(start)) continue;
-    const stack: Array<{ id: string; iterator: Iterator<string> }> = [];
-    visited.add(start);
-    stack.push({ id: start, iterator: (adjacency.get(start) ?? new Set<string>()).values() });
+    if (indices.has(start)) continue;
+    const frames: TarjanFrame[] = [];
+    enter(start, null, frames);
 
-    while (stack.length > 0) {
-      const frame = stack[stack.length - 1]!;
-      const next = frame.iterator.next();
-      if (next.done) {
-        order.push(frame.id);
-        stack.pop();
+    while (frames.length > 0) {
+      const frame = frames[frames.length - 1]!;
+      const next = frame.neighbors.next();
+      if (!next.done) {
+        const neighbor = next.value;
+        if (!indices.has(neighbor)) {
+          enter(neighbor, frame.id, frames);
+        } else if (onStack.has(neighbor)) {
+          lowlink.set(frame.id, Math.min(lowlink.get(frame.id)!, indices.get(neighbor)!));
+        }
         continue;
       }
-      const neighbor = next.value;
-      if (visited.has(neighbor)) continue;
-      visited.add(neighbor);
-      stack.push({
-        id: neighbor,
-        iterator: (adjacency.get(neighbor) ?? new Set<string>()).values(),
-      });
-    }
-  }
 
-  const reverse = new Map<string, string[]>();
-  for (const id of adjacency.keys()) reverse.set(id, []);
-  for (const [from, targets] of adjacency) {
-    for (const to of targets) {
-      reverse.get(to)?.push(from);
-    }
-  }
-
-  const assigned = new Set<string>();
-  const components: string[][] = [];
-  for (let i = order.length - 1; i >= 0; i--) {
-    const start = order[i]!;
-    if (assigned.has(start)) continue;
-    const component: string[] = [];
-    const stack = [start];
-    assigned.add(start);
-    while (stack.length > 0) {
-      const current = stack.pop()!;
-      component.push(current);
-      for (const neighbor of reverse.get(current) ?? []) {
-        if (assigned.has(neighbor)) continue;
-        assigned.add(neighbor);
-        stack.push(neighbor);
+      frames.pop();
+      if (lowlink.get(frame.id) === indices.get(frame.id)) {
+        const component: string[] = [];
+        let member: string;
+        do {
+          member = stack.pop()!;
+          onStack.delete(member);
+          component.push(member);
+        } while (member !== frame.id);
+        components.push(component);
+      }
+      if (frame.parent !== null) {
+        lowlink.set(frame.parent, Math.min(lowlink.get(frame.parent)!, lowlink.get(frame.id)!));
       }
     }
-    components.push(component);
   }
 
   return components;

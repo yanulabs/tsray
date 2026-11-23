@@ -49,9 +49,20 @@ export function globToRegExp(pattern: string): RegExp {
   return new RegExp(out);
 }
 
+const regexCache = new Map<string, RegExp>();
+
+function cachedGlob(pattern: string): RegExp {
+  let regex = regexCache.get(pattern);
+  if (!regex) {
+    regex = globToRegExp(pattern);
+    regexCache.set(pattern, regex);
+  }
+  return regex;
+}
+
 export function matchesAny(patterns: readonly string[], value: string): boolean {
   const normalized = value.replace(/\\/g, "/");
-  return patterns.some((pattern) => globToRegExp(pattern).test(normalized));
+  return patterns.some((pattern) => cachedGlob(pattern).test(normalized));
 }
 
 export const DEFAULT_EXCLUDES = [
@@ -77,9 +88,17 @@ export const DEFAULT_ENTRYPOINTS = [
   "src/index.{ts,tsx,js,jsx}",
   "src/entry-client.{ts,tsx,js,jsx}",
   "src/entry-server.{ts,tsx,js,jsx}",
+  "src/entry.client.{ts,tsx,js,jsx}",
+  "src/entry.server.{ts,tsx,js,jsx}",
   "src/App.{ts,tsx,js,jsx}",
-  "src/app/**/{page,layout,loading,error,not-found,global-error,template,default,route,middleware}.{ts,tsx,js,jsx}",
-  "app/**/{page,layout,loading,error,not-found,global-error,template,default,route,middleware}.{ts,tsx,js,jsx}",
+  "src/app/**/{page,layout,loading,error,not-found,global-error,template,default,route,middleware,index,_layout,+not-found,+html}.{ts,tsx,js,jsx}",
+  "app/**/{page,layout,loading,error,not-found,global-error,template,default,route,middleware,index,_layout,+not-found,+html}.{ts,tsx,js,jsx}",
+  "app/entry.client.{ts,tsx,js,jsx}",
+  "app/entry.server.{ts,tsx,js,jsx}",
+  "middleware.{ts,tsx,js,jsx}",
+  "src/middleware.{ts,tsx,js,jsx}",
+  "instrumentation.{ts,js}",
+  "src/instrumentation.{ts,js}",
   "pages/**/*.{ts,tsx,js,jsx}",
   "src/pages/**/*.{ts,tsx,js,jsx}",
   "src/routes/**/*.{ts,tsx,js,jsx}",

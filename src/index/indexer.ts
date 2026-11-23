@@ -18,6 +18,7 @@ import {
   isEntrypointFile,
   isExcluded,
   isSourceFile,
+  loadConfig,
   readPackageEntrypoints,
   resolveProject,
   toPosix,
@@ -69,7 +70,7 @@ export class TsReactIndexer {
   readonly tsconfigPath: string;
   readonly tsconfigPaths: string[];
   readonly workspace: boolean;
-  readonly config: ReturnType<typeof resolveProject>["config"];
+  config: ReturnType<typeof resolveProject>["config"];
   readonly typescriptVersion = ts.version;
 
   private parsedProjects: ParsedProject[] = [];
@@ -96,9 +97,9 @@ export class TsReactIndexer {
     this.tsconfigPaths = resolved.tsconfigPaths;
     this.workspace = resolved.workspace;
     this.config = resolved.config;
-    this.packageEntrypoints = readPackageEntrypoints(this.root);
 
     this.loadProjects();
+    this.packageEntrypoints = this.collectPackageEntrypoints();
     this.moduleResolutionCache = ts.createModuleResolutionCache(
       this.root,
       (fileName) => (ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()),
@@ -156,12 +157,15 @@ export class TsReactIndexer {
       baseUrl: this.root,
     };
     if (merged.jsx === undefined) merged.jsx = ts.JsxEmit.ReactJSX;
-    if (merged.allowJs === undefined && this.hasJavaScriptSources()) merged.allowJs = true;
+    if (merged.allowJs === undefined && this.hasJavaScriptSources(parsed)) merged.allowJs = true;
     if (!merged.moduleResolution) merged.moduleResolution = ts.ModuleResolutionKind.Bundler;
 
-    const paths: ts.MapLike<string[]> = { ...(primaryOptions.paths ?? {}) };
-    for (const project of parsed) {
-      if (project === primary) continue;
+    // A single LanguageService has one baseUrl. Normalize every project's path
+    // mappings to workspace-root-relative targets so workspace aliases such as
+    // `@acme/ui` resolve identically in every package.
+    const paths: ts.MapLike<string[]> = {};
+    const projectsInOrder = [primary, ...parsed.filter((project) => project !== primary)];
+    for (const project of projectsInOrder) {
       const projectPaths = project.options.paths;
       if (!projectPaths) continue;
       const base = project.options.baseUrl
@@ -169,9 +173,12 @@ export class TsReactIndexer {
         : path.dirname(project.path);
       for (const [pattern, targets] of Object.entries(projectPaths)) {
         if (paths[pattern]) continue;
-        paths[pattern] = targets.map((target) =>
-          target.startsWith(".") ? path.resolve(base, target) : target
-        );
+        paths[pattern] = targets.map((target) => {
+          if (!target.startsWith(".")) return target;
+          const absolute = path.resolve(base, target);
+          const relative = toPosix(path.relative(this.root, absolute));
+          return relative || ".";
+        });
       }
     }
     if (Object.keys(paths).length > 0) merged.paths = paths;
@@ -206,10 +213,22 @@ export class TsReactIndexer {
     }
   }
 
-  private hasJavaScriptSources(): boolean {
-    return this.parsedProjects.some((project) =>
+  private hasJavaScriptSources(projects: ParsedProject[]): boolean {
+    return projects.some((project) =>
       project.fileNames.some((file) => /\.[cm]?jsx?$/.test(file))
     );
+  }
+
+  private collectPackageEntrypoints(): string[] {
+    const patterns = new Set(readPackageEntrypoints(this.root));
+    const directories = new Set(this.parsedProjects.map((project) => path.dirname(project.path)));
+    for (const directory of directories) {
+      for (const pattern of readPackageEntrypoints(directory)) {
+        const relative = toPosix(path.relative(this.root, path.join(directory, pattern)));
+        if (!relative.startsWith("..")) patterns.add(relative);
+      }
+    }
+    return [...patterns];
   }
 
   private isIgnoredAbsolute(file: string): boolean {
@@ -272,7 +291,9 @@ export class TsReactIndexer {
 
   notifyFilesChanged(changedFiles: string[], reloadConfig = false): void {
     if (reloadConfig) {
+      this.config = loadConfig(this.root);
       this.loadProjects();
+      this.packageEntrypoints = this.collectPackageEntrypoints();
       this.languageService.dispose();
       this.languageService = this.createLanguageService();
       this.diagnosticsCache.clear();
@@ -470,7 +491,8 @@ export class TsReactIndexer {
       propsType: string | null,
       signature: string,
       members = 0,
-      parentId: string | null = null
+      parentId: string | null = null,
+      hashSignature = signature
     ): string => {
       const relative = relOf(sourceFile);
       const id = container
@@ -480,13 +502,16 @@ export class TsReactIndexer {
       const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
       const directive = getFileDirective(sourceFile);
       const normalized = normalizeNodeText(node, sourceFile);
-      const { sigHash, selfHash } = computeDirectHashes(signature, normalized, directive);
+      const { sigHash, selfHash } = computeDirectHashes(hashSignature, normalized, directive);
       const existing = symbols.get(id);
       const hasBody = isNodeWithBody(node);
 
       if (existing && !hasBody && symbolBody.get(id) === true) {
         declToId.set(node, id);
-        if (exported) existing.exported = true;
+        if (exported) {
+          existing.exported = true;
+          if (files.get(relative)?.isEntrypoint) existing.isEntrypoint = true;
+        }
         if (defaultExport) existing.defaultExport = true;
         return id;
       }
@@ -568,7 +593,9 @@ export class TsReactIndexer {
             defaultExported(statement),
             classInfo.propsType,
             classInfo.signature,
-            statement.members.length
+            statement.members.length,
+            null,
+            classApiSignature(statement, sourceFile)
           );
           for (const member of statement.members) {
             if (ts.isMethodDeclaration(member) && member.name && ts.isIdentifier(member.name)) {
@@ -581,7 +608,7 @@ export class TsReactIndexer {
                 member.name.text,
                 "method",
                 name,
-                fileExported(statement),
+                fileExported(statement) && isPublicMember(member),
                 false,
                 null,
                 signature,
@@ -604,7 +631,9 @@ export class TsReactIndexer {
             false,
             null,
             checker.typeToString(checker.getTypeAtLocation(statement)),
-            statement.members.length
+            statement.members.length,
+            null,
+            normalizeNodeText(statement, sourceFile)
           );
           continue;
         }
@@ -620,7 +649,9 @@ export class TsReactIndexer {
             false,
             null,
             checker.typeToString(checker.getTypeAtLocation(statement)),
-            ts.isTypeLiteralNode(statement.type) ? statement.type.members.length : 0
+            ts.isTypeLiteralNode(statement.type) ? statement.type.members.length : 0,
+            null,
+            normalizeNodeText(statement, sourceFile)
           );
           continue;
         }
@@ -636,7 +667,9 @@ export class TsReactIndexer {
             false,
             null,
             checker.typeToString(checker.getTypeAtLocation(statement)),
-            statement.members.length
+            statement.members.length,
+            null,
+            normalizeNodeText(statement, sourceFile)
           );
           continue;
         }
@@ -646,7 +679,7 @@ export class TsReactIndexer {
             if (!ts.isIdentifier(declaration.name) || !declaration.initializer) continue;
             const name = declaration.name.text;
             const initializer = unwrapExpression(declaration.initializer);
-            const hoc = classifyInitializer(initializer);
+            const hoc = classifyInitializer(initializer, checker);
 
             if (hoc.kind === "context") {
               registerSymbol(
@@ -731,7 +764,7 @@ export class TsReactIndexer {
             ts.isCallExpression(expression)
           ) {
             const name = pascalCase(path.basename(relative));
-            const hoc = classifyInitializer(expression);
+            const hoc = classifyInitializer(expression, checker);
             const callable = classifyCallable(
               checker,
               expression,
@@ -767,9 +800,9 @@ export class TsReactIndexer {
               const record = symbols.get(target);
               if (!record) continue;
               record.exported = true;
+              if (files.get(record.file)?.isEntrypoint) record.isEntrypoint = true;
               if (specifier.name.text === "default") {
                 record.defaultExport = true;
-                if (files.get(record.file)?.isEntrypoint) record.isEntrypoint = true;
               }
             }
           }
@@ -977,7 +1010,8 @@ export class TsReactIndexer {
 
         if (ts.isCallExpression(node)) {
           const calleeText = node.expression.getText(sourceFile);
-          if (/^(React\.)?(useContext|use)$/.test(calleeText) && node.arguments.length > 0) {
+          const calleeName = resolvedSymbolName(checker, node.expression) ?? calleeText.split(".").pop();
+          if ((calleeName === "useContext" || calleeName === "use") && node.arguments.length > 0) {
             const contextId = resolveDeclarationTarget(checker, node.arguments[0]!, declToId);
             if (contextId) {
               addEdge(currentId, contextId, "consumes_context", relative, line);
@@ -985,7 +1019,7 @@ export class TsReactIndexer {
             }
           }
 
-          if (/^(React\.)?createElement$/.test(calleeText) && node.arguments.length > 0) {
+          if (calleeName === "createElement" && node.arguments.length > 0) {
             const target = resolveDeclarationTarget(checker, node.arguments[0]!, declToId);
             if (target) {
               addEdge(currentId, target, "renders", relative, line);
@@ -1076,7 +1110,11 @@ export class TsReactIndexer {
       if (!symbol || !node.getSourceFile() || node.getSourceFile().isDeclarationFile) continue;
       seenStructuralIds.add(id);
       if (symbol.kind === "interface") {
-        interfaceDecls.push({ id, type: checker.getTypeAtLocation(node), node });
+        const type = checker.getTypeAtLocation(node);
+        // An interface with only optional/index members is assignable from
+        // almost any object and produces meaningless structural edges.
+        if (!hasRequiredMembers(type)) continue;
+        interfaceDecls.push({ id, type, node });
       } else if (symbol.kind === "class" || symbol.kind === "type") {
         candidateDecls.push({ id, type: checker.getTypeAtLocation(node), symbol });
       }
@@ -1127,6 +1165,9 @@ export class TsReactIndexer {
     const moduleEdges: Array<[string, string]> = [];
     for (const edge of fileImports) {
       if (edge.isTest) continue;
+      // `import type` is erased at runtime and cannot create a runtime module
+      // cycle. It still appears in the dependency graph for navigation.
+      if (edge.typeOnly) continue;
       if (edge.fromModule !== edge.toModule) moduleEdges.push([edge.fromModule, edge.toModule]);
     }
     const moduleCycles = findDirectedCycles(moduleSet, moduleEdges);
@@ -1177,6 +1218,76 @@ function canonicalPath(file: string): string {
   }
 }
 
+function classApiSignature(
+  node: ts.ClassDeclaration | ts.ClassExpression,
+  sourceFile: ts.SourceFile
+): string {
+  const parts: string[] = [];
+  for (const heritage of node.heritageClauses ?? []) {
+    parts.push(heritage.getText(sourceFile));
+  }
+  for (const member of node.members) {
+    if (!isPublicMember(member)) continue;
+    const modifiers = (ts.canHaveModifiers(member) ? ts.getModifiers(member) : undefined)
+      ?.map((modifier) => modifier.getText(sourceFile))
+      .filter((modifier) => modifier !== "async" && modifier !== "public");
+    const prefix = modifiers && modifiers.length > 0 ? `${modifiers.join(" ")} ` : "";
+    if (ts.isConstructorDeclaration(member)) {
+      const parameters = member.parameters.map((parameter) => parameter.getText(sourceFile)).join(", ");
+      parts.push(`constructor(${parameters})`);
+      continue;
+    }
+    if (ts.isMethodDeclaration(member)) {
+      const name = member.name.getText(sourceFile);
+      const typeParameters = member.typeParameters
+        ? `<${member.typeParameters.map((parameter) => parameter.getText(sourceFile)).join(", ")}>`
+        : "";
+      const parameters = member.parameters.map((parameter) => parameter.getText(sourceFile)).join(", ");
+      const returns = member.type ? `: ${member.type.getText(sourceFile)}` : "";
+      parts.push(`${prefix}${name}${typeParameters}(${parameters})${returns}`);
+      continue;
+    }
+    if (ts.isPropertyDeclaration(member)) {
+      const name = member.name.getText(sourceFile);
+      const optional = member.questionToken ? "?" : "";
+      const type = member.type ? `: ${member.type.getText(sourceFile)}` : "";
+      parts.push(`${prefix}${name}${optional}${type}`);
+      continue;
+    }
+    if (ts.isGetAccessorDeclaration(member) || ts.isSetAccessorDeclaration(member)) {
+      const parameters = member.parameters.map((parameter) => parameter.getText(sourceFile)).join(", ");
+      const returns = member.type ? `: ${member.type.getText(sourceFile)}` : "";
+      parts.push(`${prefix}get ${member.name.getText(sourceFile)}(${parameters})${returns}`);
+      continue;
+    }
+    if (ts.isIndexSignatureDeclaration(member)) {
+      parts.push(member.getText(sourceFile));
+    }
+  }
+  return parts.join("; ");
+}
+
+function hasRequiredMembers(type: ts.Type): boolean {
+  const properties = type.getProperties();
+  if (properties.length === 0) return false;
+  return properties.some((property) => (property.flags & ts.SymbolFlags.Optional) === 0);
+}
+
+function isPublicMember(node: ts.ClassElement): boolean {
+  const modifiers = ts.canHaveModifiers(node) ? ts.getModifiers(node) : undefined;
+  if (
+    modifiers?.some(
+      (modifier) =>
+        modifier.kind === ts.SyntaxKind.PrivateKeyword ||
+        modifier.kind === ts.SyntaxKind.ProtectedKeyword
+    )
+  ) {
+    return false;
+  }
+  const name = (node as ts.NamedDeclaration).name;
+  return !name || !ts.isPrivateIdentifier(name);
+}
+
 function isNodeWithBody(node: ts.Node): boolean {
   return (
     (ts.isFunctionDeclaration(node) ||
@@ -1206,11 +1317,11 @@ interface ClassifiedInitializer {
   inner: ts.Expression | null;
 }
 
-function classifyInitializer(expression: ts.Expression): ClassifiedInitializer {
+function classifyInitializer(expression: ts.Expression, checker: ts.TypeChecker): ClassifiedInitializer {
   const current = unwrapExpression(expression);
   if (!ts.isCallExpression(current)) return { kind: "expression", inner: null };
   const calleeText = current.expression.getText();
-  const name = calleeText.split(".").pop() ?? calleeText;
+  const name = resolvedSymbolName(checker, current.expression) ?? calleeText.split(".").pop() ?? calleeText;
   if (name === "lazy") {
     const argument = current.arguments[0] ?? null;
     return { kind: "lazy", inner: (argument && extractDynamicImport(argument)) ?? argument };
@@ -1345,6 +1456,19 @@ function resolveDeclarationTarget(
   const symbol = checker.getSymbolAtLocation(node);
   if (!symbol) return null;
   return resolveSymbolTarget(symbol, checker, declToId);
+}
+
+function resolvedSymbolName(checker: ts.TypeChecker, node: ts.Node): string | null {
+  let symbol = checker.getSymbolAtLocation(node);
+  if (!symbol) return null;
+  if (symbol.flags & ts.SymbolFlags.Alias) {
+    try {
+      symbol = checker.getAliasedSymbol(symbol);
+    } catch {
+      return symbol.getName();
+    }
+  }
+  return symbol.getName();
 }
 
 function isReferenceIdentifier(node: ts.Identifier): boolean {

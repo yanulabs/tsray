@@ -41,6 +41,7 @@ describe("architectural diff", () => {
       buttonPath,
       fs
         .readFileSync(buttonPath, "utf8")
+        .replace("label: string;", "label: string | number;")
         .replace("export function Button({ label }: ButtonProps)", "export function Button({ label }: ButtonProps, extra?: string)")
         .replace("return <button>{label}</button>;", "return <button>{`${label}${extra ?? \"\"}`}</button>;")
     );
@@ -50,6 +51,9 @@ describe("architectural diff", () => {
     const result = runArchitecturalDiff(repo, "HEAD", ["breaking_api", "dead_code"]);
     expect(result.base_ref).toBe("HEAD");
     expect(result.breaking_api.some((item) => item.name === "Button" && item.reason === "signature_changed")).toBe(true);
+    expect(
+      result.breaking_api.some((item) => item.name === "ButtonProps" && item.reason === "signature_changed")
+    ).toBe(true);
     expect(result.new_dead_code.some((item) => item.name === "newOrphan")).toBe(true);
     expect(result.failed_gates).toContain("breaking_api");
     expect(result.failed_gates).toContain("dead_code");

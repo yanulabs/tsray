@@ -9,6 +9,10 @@ describe("glob matching", () => {
     expect(matchesAny(DEFAULT_ENTRYPOINTS, "src/main.tsx")).toBe(true);
     expect(matchesAny(DEFAULT_ENTRYPOINTS, "src/components/Button.tsx")).toBe(false);
     expect(matchesAny(DEFAULT_ENTRYPOINTS, "src/components/Button.stories.tsx")).toBe(true);
+    expect(matchesAny(DEFAULT_ENTRYPOINTS, "middleware.ts")).toBe(true);
+    expect(matchesAny(DEFAULT_ENTRYPOINTS, "app/profile/index.tsx")).toBe(true);
+    expect(matchesAny(DEFAULT_ENTRYPOINTS, "app/profile/_layout.tsx")).toBe(true);
+    expect(matchesAny(DEFAULT_ENTRYPOINTS, "src/app/dashboard/route.ts")).toBe(true);
   });
 
   it("supports braces, globstar, and question marks", () => {
