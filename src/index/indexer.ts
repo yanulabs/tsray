@@ -174,10 +174,9 @@ export class TsReactIndexer {
       for (const [pattern, targets] of Object.entries(projectPaths)) {
         if (paths[pattern]) continue;
         paths[pattern] = targets.map((target) => {
-          if (!target.startsWith(".")) return target;
-          const absolute = path.resolve(base, target);
+          const absolute = path.isAbsolute(target) ? target : path.resolve(base, target);
           const relative = toPosix(path.relative(this.root, absolute));
-          return relative || ".";
+          return relative.startsWith("..") ? toPosix(absolute) : relative || ".";
         });
       }
     }
@@ -325,6 +324,10 @@ export class TsReactIndexer {
         this.diagnosticsCache.delete(absolute);
       }
     }
+
+    // A newly added file can satisfy a module specifier that previously failed
+    // to resolve, so drop the resolver cache for this invalidation batch.
+    this.moduleResolutionCache.clear();
 
     // Type errors can surface in direct importers after a dependency changes.
     if (this.lastSnapshot) {
@@ -582,7 +585,7 @@ export class TsReactIndexer {
 
         if (ts.isClassDeclaration(statement)) {
           const name = statement.name?.text ?? pascalCase(path.basename(relative));
-          const classInfo = classifyClass(checker, statement, name, sourceFile);
+          const classInfo = classifyClass(checker, statement, sourceFile);
           const classId = registerSymbol(
             sourceFile,
             statement,
@@ -1379,7 +1382,7 @@ function classifyCallable(
   const returnType = callSignatures[0]?.getReturnType();
   const returnText = returnType ? checker.typeToString(returnType) : "";
   const returnsJsx =
-    /(ReactNode|ReactElement|Element|JSX|ReactPortal)/.test(returnText) ||
+    /(^|[.\s|&])(ReactNode|ReactElement|ReactPortal|JSX\.Element|Element)(?=$|[.\s|&<])/.test(returnText) ||
     containsJsx(node) ||
     (ts.isCallExpression(node) &&
       /(memo|forwardRef|lazy)$/.test(node.expression.getText(sourceFile)));
@@ -1398,7 +1401,6 @@ function classifyCallable(
 function classifyClass(
   checker: ts.TypeChecker,
   node: ts.ClassDeclaration | ts.ClassExpression,
-  name: string,
   sourceFile: ts.SourceFile
 ): CallableClassification {
   const signature = checker.typeToString(checker.getTypeAtLocation(node));
@@ -1416,9 +1418,8 @@ function classifyClass(
     }
   }
 
-  if (isReactComponent || /Component/.test(signature) || /^[A-Z]/.test(name)) {
-    // A class named in PascalCase that extends a React base is a component.
-    if (isReactComponent) return { kind: "component", propsType, signature };
+  if (isReactComponent) {
+    return { kind: "component", propsType, signature };
   }
   return { kind: "class", propsType: null, signature };
 }

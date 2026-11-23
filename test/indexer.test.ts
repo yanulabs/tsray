@@ -135,8 +135,13 @@ describe("TypeScript/React indexer", () => {
     );
     const extraPath = path.join(temporary, "src/Extra.tsx");
     fs.writeFileSync(extraPath, "export function Extra() {\n  return <div>extra</div>;\n}\n");
+    const mainPath = path.join(temporary, "src/main.tsx");
+    fs.writeFileSync(
+      mainPath,
+      `import { add } from "./utils";\n${fs.readFileSync(mainPath, "utf8")}\nadd(1, 2);\n`
+    );
 
-    indexer.notifyFilesChanged([appPath, extraPath]);
+    indexer.notifyFilesChanged([appPath, extraPath, mainPath]);
     const after = indexer.buildIndex({ fullDiagnostics: false });
     const afterApp = [...after.symbols.values()].find((candidate) => candidate.name === "App")!;
     const extra = [...after.symbols.values()].find((candidate) => candidate.name === "Extra");
@@ -144,6 +149,9 @@ describe("TypeScript/React indexer", () => {
     expect(after.prodErrors).toEqual([]);
     expect(afterApp.selfHash).not.toBe(beforeApp.selfHash);
     expect(extra?.kind).toBe("component");
+    // Module-level calls in an entrypoint must keep imported symbols alive even
+    // when auditing exported code.
+    expect(getDeadCode(after, true).some((symbol) => symbol.name === "add")).toBe(false);
 
     // Add a real cross-module cycle and verify that the incremental program
     // reports it from resolved imports rather than syntax guesses.

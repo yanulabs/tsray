@@ -59,9 +59,11 @@ function graphOf(snapshot: IndexSnapshot): GraphIndex {
     outgoing.get(edge.fromId)!.push(edge);
     if (!incoming.has(edge.toId)) incoming.set(edge.toId, []);
     incoming.get(edge.toId)!.push(edge);
-    if (REFERENCE_EDGE_KINDS.has(edge.kind) && !edge.fromId.startsWith("file:")) {
+    if (REFERENCE_EDGE_KINDS.has(edge.kind)) {
       fanIn.set(edge.toId, (fanIn.get(edge.toId) ?? 0) + 1);
-      fanOut.set(edge.fromId, (fanOut.get(edge.fromId) ?? 0) + 1);
+      if (!edge.fromId.startsWith("file:")) {
+        fanOut.set(edge.fromId, (fanOut.get(edge.fromId) ?? 0) + 1);
+      }
     }
   }
 
@@ -128,6 +130,8 @@ function buildModuleEdges(snapshot: IndexSnapshot): ModuleEdgeSummary[] {
     const from = snapshot.symbols.get(edge.fromId);
     const to = snapshot.symbols.get(edge.toId);
     if (!from || !to || from.module === to.module) continue;
+    // Production architecture excludes test/story coupling.
+    if (from.isTest || to.isTest) continue;
     get(from.module, to.module).symbols++;
   }
 
@@ -345,7 +349,8 @@ export function getCallGraph(
   options: { depth?: number; direction?: "callers" | "callees" | "both" } = {}
 ): { root: string; nodes: GraphViewNode[]; edges: GraphViewEdge[]; truncated: boolean } {
   const graph = graphOf(snapshot);
-  const depth = Math.min(Math.max(options.depth ?? 2, 1), 6);
+  const requestedDepth = options.depth ?? 2;
+  const depth = Number.isFinite(requestedDepth) ? Math.min(Math.max(requestedDepth, 1), 6) : 2;
   const direction = options.direction ?? "both";
   const nodes = new Map<string, GraphViewNode>();
   const edges = new Map<string, GraphViewEdge>();
@@ -377,6 +382,10 @@ export function getCallGraph(
         if (!CALL_EDGE_KINDS.has(edge.kind)) continue;
         const other = edge.fromId === current ? edge.toId : edge.fromId;
         if (!snapshot.symbols.has(other)) continue;
+        if (!nodes.has(other) && nodes.size >= 2000) {
+          truncated = true;
+          break;
+        }
         addNode(other);
         const key = `${edge.fromId}|${edge.toId}|${edge.kind}|${edge.file}:${edge.line}`;
         if (!seenPairs.has(key)) {
@@ -388,10 +397,6 @@ export function getCallGraph(
             file: edge.file,
             line: edge.line,
           });
-        }
-        if (!nodes.has(other) && nodes.size >= 2000) {
-          truncated = true;
-          break;
         }
         if (!next.includes(other)) next.push(other);
       }
@@ -409,7 +414,8 @@ export function getComponentTree(
   options: { depth?: number; direction?: "children" | "parents" | "both" } = {}
 ): { root: string; nodes: GraphViewNode[]; edges: GraphViewEdge[]; contexts: GraphViewNode[]; hooks: GraphViewNode[] } {
   const graph = graphOf(snapshot);
-  const depth = Math.min(Math.max(options.depth ?? 2, 1), 6);
+  const requestedDepth = options.depth ?? 2;
+  const depth = Number.isFinite(requestedDepth) ? Math.min(Math.max(requestedDepth, 1), 6) : 2;
   const direction = options.direction ?? "both";
   const nodes = new Map<string, GraphViewNode>();
   const edges = new Map<string, GraphViewEdge>();
@@ -564,6 +570,12 @@ export function getDeadCode(snapshot: IndexSnapshot, includeExported = false): S
   const graph = graphOf(snapshot);
   const roots = new Set<string>();
 
+  // Root file nodes too: an entrypoint can invoke project code from module-level
+  // statements before any symbol is declared.
+  for (const file of snapshot.files.values()) {
+    if (file.isEntrypoint || file.isTest) roots.add(`file:${file.path}`);
+  }
+
   for (const symbol of snapshot.symbols.values()) {
     if (symbol.isTest) {
       roots.add(symbol.id);
@@ -598,6 +610,7 @@ export function getImpactAnalysis(
   maxDepth = 4
 ): ImpactAnalysis {
   const graph = graphOf(snapshot);
+  const depthLimit = Number.isFinite(maxDepth) ? Math.min(Math.max(maxDepth, 1), 12) : 4;
   const target = snapshot.symbols.get(targetId) ?? null;
   const direct = (graph.incoming.get(targetId) ?? []).filter(
     (edge) => edge.kind !== "imports" && edge.kind !== "re_exports"
@@ -614,7 +627,7 @@ export function getImpactAnalysis(
 
   while (queue.length > 0) {
     const current = queue.shift()!;
-    if (current.depth >= maxDepth) continue;
+    if (current.depth >= depthLimit) continue;
     for (const edge of graph.incoming.get(current.id) ?? []) {
       if (edge.kind === "imports" || edge.kind === "re_exports") continue;
       const source = snapshot.symbols.get(edge.fromId);
@@ -667,7 +680,7 @@ export function getImpactAnalysis(
     impactedTestFiles: testFiles,
     transitiveCount,
     suggestedCommands: [
-      ...(testFiles.length > 0 ? [`npx vitest run ${testFiles.join(" ")}`] : []),
+      ...(testFiles.length > 0 ? [`npm test -- ${testFiles.join(" ")}`] : []),
       "npm run typecheck",
       "npm run build",
     ],
@@ -776,7 +789,8 @@ export function getDependencyGraph(
   rank: Array<{ id: string; fan_in: number; fan_out: number }>;
 } {
   const scope = options.scope ?? "module";
-  const depth = Math.min(Math.max(options.depth ?? 2, 1), 10);
+  const requestedDepth = options.depth ?? 2;
+  const depth = Number.isFinite(requestedDepth) ? Math.min(Math.max(requestedDepth, 1), 10) : 2;
   const direction = options.direction ?? "both";
 
   if (scope === "file") {
@@ -895,7 +909,8 @@ export function getDependencyGraph(
 export function explainDependency(
   snapshot: IndexSnapshot,
   from: string,
-  to: string
+  to: string,
+  options: { includeTests?: boolean } = {}
 ): {
   from: string;
   to: string;
@@ -904,7 +919,12 @@ export function explainDependency(
   symbols: Array<{ id: string; name: string; kind: string; file: string; line: number }>;
 } {
   const fileImports = snapshot.fileImports
-    .filter((edge) => edge.fromModule === from && edge.toModule === to)
+    .filter(
+      (edge) =>
+        edge.fromModule === from &&
+        edge.toModule === to &&
+        (options.includeTests || !edge.isTest)
+    )
     .map((edge) => ({
       file: edge.fromFile,
       line: edge.line,
@@ -915,7 +935,9 @@ export function explainDependency(
   const symbolEdges = snapshot.edges.filter((edge) => {
     const source = snapshot.symbols.get(edge.fromId);
     const target = snapshot.symbols.get(edge.toId);
-    return source?.module === from && target?.module === to && edge.kind !== "imports" && edge.kind !== "re_exports";
+    if (!source || !target) return false;
+    if (!options.includeTests && (source.isTest || target.isTest)) return false;
+    return source.module === from && target.module === to && edge.kind !== "imports" && edge.kind !== "re_exports";
   });
   const seenSymbols = new Set<string>();
   const symbols: Array<{ id: string; name: string; kind: string; file: string; line: number }> = [];
