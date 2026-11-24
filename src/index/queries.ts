@@ -119,7 +119,9 @@ function buildModuleEdges(snapshot: IndexSnapshot): ModuleEdgeSummary[] {
   };
 
   for (const edge of snapshot.fileImports) {
-    if (edge.isTest || edge.fromModule === edge.toModule) continue;
+    if (edge.isTest || edge.typeOnly || edge.fromModule === edge.toModule) continue;
+    // Type-only imports are erased at runtime; keep them in file-level
+    // explanations but out of the production architecture graph.
     const summary = get(edge.fromModule, edge.toModule);
     summary.imports++;
     if (!summary.files.includes(edge.fromFile)) summary.files.push(edge.fromFile);
@@ -130,9 +132,13 @@ function buildModuleEdges(snapshot: IndexSnapshot): ModuleEdgeSummary[] {
     const from = snapshot.symbols.get(edge.fromId);
     const to = snapshot.symbols.get(edge.toId);
     if (!from || !to || from.module === to.module) continue;
-    // Production architecture excludes test/story coupling.
+    // Production architecture excludes test/story coupling. Symbol edges add
+    // weight to an existing import edge but never invent a runtime dependency
+    // that the value-import graph does not contain.
     if (from.isTest || to.isTest) continue;
-    get(from.module, to.module).symbols++;
+    const key = keyOf(from.module, to.module);
+    const existing = edges.get(key);
+    if (existing) existing.symbols++;
   }
 
   return [...edges.values()].sort((a, b) => a.from.localeCompare(b.from) || a.to.localeCompare(b.to));
