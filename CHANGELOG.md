@@ -20,3 +20,5 @@ Initial release.
 - `db` commands for cache inspection, removal, and pruning.
 - React 19 + Tailwind 4 report UI with graph, hotspots, modules, contracts, explorer,
   inspector, command palette, and live refresh.
+- Goray-style ELK layered/orthogonal dependency graph with module colors, edge highlighting,
+  DFS back edges, transitive reduction, hub/isolated filters, and fit-to-view controls.

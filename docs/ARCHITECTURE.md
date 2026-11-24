@@ -210,9 +210,16 @@ exported code. Framework route files are roots via the entrypoint pattern set.
 ## Module graph and cycles
 
 `fileImports` is produced by `ts.resolveModuleName` for static imports, re-exports, and
-literal dynamic imports. Production test-file imports and erased `import type` edges are
-excluded from runtime cycle detection; both remain available for navigation. Module edges
-aggregate file imports and cross-module symbol edges. Cycles are SCCs of size > 1.
+literal dynamic imports. The production module graph is topology-defined by runtime value
+imports: test-file imports and erased `import type` edges are excluded, while type-only
+import sites remain available through file-level dependency queries and
+`explain_dependency`. Cross-module symbol edges add weight to an existing value-import edge
+but never invent a new runtime dependency. Cycles are SCCs of size > 1.
+
+The report UI uses the same ELK layered/orthogonal layout conventions as goray: compact
+monospace nodes, module color stripes, rounded orthogonal routes, haloed edges, DFS
+back-edge highlighting, transitive reduction, hub/isolated filters, module filtering,
+direction switching, and fit-to-view controls.
 
 ## SQLite model
 

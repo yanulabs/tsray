@@ -425,7 +425,8 @@ by `get_summary_context`. A mismatch returns `hash_mismatch`; re-fetch context a
 
 The offline report is a React 19 + Tailwind 4 + Vite single-file build:
 
-- **Graph** — layered module import graph, cycle edges, pan/zoom, fan-in/fan-out, coverage.
+- **Graph** — goray-style ELK layered/orthogonal module graph with compact monospace nodes,
+  module color stripes, edge highlighting, transitive reduction, filters, pan/zoom, and fit-to-view.
 - **Hotspots** — sortable risk table with test-reachability and complexity filters.
 - **Modules** — module cards with health, entrypoints, dependencies, and coverage.
 - **Contracts** — interface implementation matrix.
