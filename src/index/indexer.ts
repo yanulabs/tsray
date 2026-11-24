@@ -1,5 +1,8 @@
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
+import { Worker } from "node:worker_threads";
+import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { computeDirectHashes, computeGraphHashes, findDirectedCycles, normalizeNodeText } from "./hasher.js";
 import type {
@@ -42,12 +45,18 @@ export interface IndexerOptions {
   workspace?: boolean;
   /** Recompute every file's diagnostics instead of using the incremental cache. */
   fullDiagnostics?: boolean;
+  /** Serve and persist the semantic graph even when production diagnostics exist. */
+  allowErrors?: boolean;
+  /** Process independent owning projects in worker threads during full builds. */
+  parallel?: boolean;
 }
 
 interface ParsedProject {
   path: string;
   options: ts.CompilerOptions;
   fileNames: string[];
+  programFiles: string[];
+  ownedFiles: string[];
   references: string[];
 }
 
@@ -62,6 +71,46 @@ interface DiagnosticCacheEntry {
   diagnostics: DiagnosticWarning[];
 }
 
+export interface SerializedProjectIndex {
+  projectPath: string;
+  symbols: Array<[string, SymbolRecord]>;
+  edges: EdgeRecord[];
+  fileImports: FileImportEdge[];
+  files: Array<[string, FileRecord]>;
+  warnings: DiagnosticWarning[];
+  prodErrors: DiagnosticWarning[];
+  modules: string[];
+  diagnostics: Array<[string, DiagnosticCacheEntry]>;
+}
+
+export interface ProjectWorkerTask {
+  root: string;
+  workspace: boolean;
+  tsconfigPath: string;
+  fileVersions: Array<[string, number]>;
+  projects: Array<{ path: string }>;
+}
+
+export interface ProjectWorkerOutput {
+  results?: SerializedProjectIndex[];
+  error?: string;
+}
+
+interface IndexAccumulator {
+  symbols: Map<string, SymbolRecord>;
+  edges: EdgeRecord[];
+  fileImports: FileImportEdge[];
+  files: Map<string, FileRecord>;
+  warnings: DiagnosticWarning[];
+  prodErrors: DiagnosticWarning[];
+  modules: Set<string>;
+  declarationIds: Map<string, string>;
+  pendingWraps: PendingWrap[];
+  seenFileImports: Set<string>;
+  seenEdges: Set<string>;
+  symbolBody: Map<string, boolean>;
+}
+
 const MAX_RUNTIME_PREVIEW = 4000;
 
 export class TsReactIndexer {
@@ -70,13 +119,16 @@ export class TsReactIndexer {
   readonly tsconfigPath: string;
   readonly tsconfigPaths: string[];
   readonly workspace: boolean;
+  readonly allowErrors: boolean;
+  private readonly parallel: boolean;
   config: ReturnType<typeof resolveProject>["config"];
   readonly typescriptVersion = ts.version;
 
   private parsedProjects: ParsedProject[] = [];
-  private compilerOptions: ts.CompilerOptions = {};
-  private moduleResolutionCache: ts.ModuleResolutionCache;
+  private activeProjects: ParsedProject[] = [];
+  private readonly documentRegistry = ts.createDocumentRegistry();
   private fileList: string[] = [];
+  private fileSet = new Set<string>();
   private readonly fileVersions = new Map<string, number>();
   private readonly scriptSnapshots = new Map<
     string,
@@ -84,7 +136,6 @@ export class TsReactIndexer {
   >();
   private readonly dirtyFiles = new Set<string>();
   private readonly diagnosticsCache = new Map<string, DiagnosticCacheEntry>();
-  private languageService: ts.LanguageService;
   private lastHealthySnapshot: IndexSnapshot | null = null;
   private lastSnapshot: IndexSnapshot | null = null;
   private packageEntrypoints: string[] = [];
@@ -96,22 +147,17 @@ export class TsReactIndexer {
     this.tsconfigPath = resolved.primaryTsconfigPath;
     this.tsconfigPaths = resolved.tsconfigPaths;
     this.workspace = resolved.workspace;
+    this.allowErrors = options.allowErrors ?? resolved.workspace;
+    this.parallel = options.parallel ?? true;
     this.config = resolved.config;
 
     this.loadProjects();
     this.packageEntrypoints = this.collectPackageEntrypoints();
-    this.moduleResolutionCache = ts.createModuleResolutionCache(
-      this.root,
-      (fileName) => (ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()),
-      this.compilerOptions
-    );
-    this.languageService = this.createLanguageService();
     if (options.fullDiagnostics) this.dirtyFiles.clear();
   }
 
   private loadProjects(): void {
     const parsed: ParsedProject[] = [];
-    let primary: ParsedProject | null = null;
 
     for (const configPath of this.tsconfigPaths) {
       const read = ts.readConfigFile(configPath, ts.sys.readFile);
@@ -133,71 +179,56 @@ export class TsReactIndexer {
           `Failed to parse ${configPath}: ${ts.flattenDiagnosticMessageText(errors[0]!.messageText, "\n")}`
         );
       }
-      const project: ParsedProject = {
-        path: configPath,
-        options: result.options,
-        fileNames: result.fileNames.map((file) => path.resolve(file)),
-        references: (result.projectReferences ?? []).map((reference) =>
-          path.resolve(reference.path, "tsconfig.json")
-        ),
+      const fileNames = result.fileNames.map((file) => path.resolve(file));
+      const options: ts.CompilerOptions = {
+        ...result.options,
+        skipLibCheck: true,
+        // The language service never emits; avoiding declaration output prevents
+        // composite projects from requiring prebuilt referenced projects.
+        noEmit: result.options.composite ? false : result.options.noEmit,
       };
-      parsed.push(project);
-      if (configPath === this.tsconfigPath) primary = project;
+      if (options.jsx === undefined) options.jsx = ts.JsxEmit.ReactJSX;
+      if (options.allowJs === undefined && fileNames.some((file) => /\.[cm]?jsx?$/.test(file))) {
+        options.allowJs = true;
+      }
+      if (!options.moduleResolution) options.moduleResolution = ts.ModuleResolutionKind.Bundler;
+      parsed.push({
+        path: configPath,
+        options,
+        fileNames,
+        programFiles: fileNames
+          .filter((file) => isSourceFile(file) && !this.isIgnoredAbsolute(file))
+          .map(canonicalPath),
+        ownedFiles: [],
+        references: (result.projectReferences ?? []).map((reference) =>
+          path.resolve(path.dirname(configPath), reference.path, "tsconfig.json")
+        ),
+      });
     }
 
-    primary ??= parsed[0] ?? null;
-    if (!primary) throw new Error(`No TypeScript project could be loaded from ${this.root}`);
+    if (parsed.length === 0) throw new Error(`No TypeScript project could be loaded from ${this.root}`);
     this.parsedProjects = parsed;
 
-    const primaryOptions = primary.options;
-    const merged: ts.CompilerOptions = {
-      ...primaryOptions,
-      noEmit: true,
-      skipLibCheck: true,
-      baseUrl: this.root,
-    };
-    if (merged.jsx === undefined) merged.jsx = ts.JsxEmit.ReactJSX;
-    if (merged.allowJs === undefined && this.hasJavaScriptSources(parsed)) merged.allowJs = true;
-    if (!merged.moduleResolution) merged.moduleResolution = ts.ModuleResolutionKind.Bundler;
-
-    // A single LanguageService has one baseUrl. Normalize every project's path
-    // mappings to workspace-root-relative targets so workspace aliases such as
-    // `@acme/ui` resolve identically in every package.
-    const paths: ts.MapLike<string[]> = {};
-    const projectsInOrder = [primary, ...parsed.filter((project) => project !== primary)];
-    for (const project of projectsInOrder) {
-      const projectPaths = project.options.paths;
-      if (!projectPaths) continue;
-      const base = project.options.baseUrl
-        ? path.resolve(path.dirname(project.path), project.options.baseUrl)
-        : path.dirname(project.path);
-      for (const [pattern, targets] of Object.entries(projectPaths)) {
-        if (paths[pattern]) continue;
-        paths[pattern] = targets.map((target) => {
-          const absolute = path.isAbsolute(target) ? target : path.resolve(base, target);
-          const relative = toPosix(path.relative(this.root, absolute));
-          return relative.startsWith("..") ? toPosix(absolute) : relative || ".";
-        });
-      }
-    }
-    if (Object.keys(paths).length > 0) merged.paths = paths;
-
-    this.compilerOptions = merged;
-    this.moduleResolutionCache = ts.createModuleResolutionCache(
-      this.root,
-      (fileName) => (ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()),
-      this.compilerOptions
-    );
-
+    // A file can be included by several configs (for example tsconfig.app and
+    // tsconfig.lib). Assign it once, preferring the broadest applicable config
+    // so tests and demos are not lost or checked under a library-only config.
+    const candidates = parsed
+      .filter((project) => project.fileNames.length > 0)
+      .sort((a, b) => b.fileNames.length - a.fileNames.length || a.path.localeCompare(b.path));
     const files = new Set<string>();
-    for (const project of parsed) {
+    for (const project of candidates) {
       for (const file of project.fileNames) {
-        if (!isSourceFile(file)) continue;
-        if (this.isIgnoredAbsolute(file)) continue;
-        files.add(canonicalPath(file));
+        if (!isSourceFile(file) || this.isIgnoredAbsolute(file)) continue;
+        const absolute = canonicalPath(file);
+        if (files.has(absolute)) continue;
+        files.add(absolute);
+        project.ownedFiles.push(absolute);
       }
+      project.ownedFiles.sort();
     }
+    this.activeProjects = candidates.filter((project) => project.ownedFiles.length > 0);
     this.fileList = [...files].sort();
+    this.fileSet = new Set(this.fileList);
     for (const file of this.fileList) {
       if (!this.fileVersions.has(file)) this.fileVersions.set(file, 1);
     }
@@ -208,14 +239,9 @@ export class TsReactIndexer {
       if (!allowed.has(file)) {
         this.fileVersions.delete(file);
         this.scriptSnapshots.delete(file);
+        this.diagnosticsCache.delete(file);
       }
     }
-  }
-
-  private hasJavaScriptSources(projects: ParsedProject[]): boolean {
-    return projects.some((project) =>
-      project.fileNames.some((file) => /\.[cm]?jsx?$/.test(file))
-    );
   }
 
   private collectPackageEntrypoints(): string[] {
@@ -238,9 +264,9 @@ export class TsReactIndexer {
     return isExcluded(relative, this.config);
   }
 
-  private createLanguageService(): ts.LanguageService {
+  private createLanguageService(project: ParsedProject): ts.LanguageService {
     const host: ts.LanguageServiceHost = {
-      getScriptFileNames: () => this.fileList,
+      getScriptFileNames: () => project.programFiles,
       getScriptVersion: (fileName) => {
         const absolute = path.resolve(fileName);
         return String(this.fileVersions.get(absolute) ?? this.fileVersions.get(canonicalPath(absolute)) ?? 0);
@@ -259,7 +285,7 @@ export class TsReactIndexer {
         return snapshot;
       },
       getCurrentDirectory: () => this.root,
-      getCompilationSettings: () => this.compilerOptions,
+      getCompilationSettings: () => project.options,
       getDefaultLibFileName: (options) => ts.getDefaultLibFilePath(options),
       fileExists: ts.sys.fileExists,
       readFile: ts.sys.readFile,
@@ -269,7 +295,44 @@ export class TsReactIndexer {
       useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
       getNewLine: () => ts.sys.newLine,
     };
-    return ts.createLanguageService(host, ts.createDocumentRegistry());
+    return ts.createLanguageService(host, this.documentRegistry);
+  }
+
+  /** @internal Restrict a worker to the projects assigned by the parent process. */
+  restrictToProjects(configPaths: string[]): void {
+    const allowed = new Set(configPaths);
+    this.activeProjects = this.activeProjects.filter((project) => allowed.has(project.path));
+  }
+
+  /** @internal Keep worker diagnostics keyed to the parent's script versions. */
+  setFileVersions(versions: Array<[string, number]>): void {
+    this.fileVersions.clear();
+    for (const [file, version] of versions) this.fileVersions.set(file, version);
+  }
+
+  /** @internal Transfer one project's diagnostics back to the parent. */
+  drainDiagnosticsCache(): Array<[string, DiagnosticCacheEntry]> {
+    const entries = [...this.diagnosticsCache];
+    this.diagnosticsCache.clear();
+    return entries;
+  }
+
+  /** @internal Index one assigned project and return a structured-clone-safe result. */
+  buildProjectIndex(configPath: string, fullDiagnostics: boolean): SerializedProjectIndex {
+    const project = this.activeProjects.find((candidate) => candidate.path === configPath);
+    if (!project) throw new Error(`Project is not assigned to this worker: ${configPath}`);
+    const accumulator = this.indexProjectLocal(project, fullDiagnostics);
+    return {
+      projectPath: project.path,
+      symbols: [...accumulator.symbols],
+      edges: accumulator.edges,
+      fileImports: accumulator.fileImports,
+      files: [...accumulator.files],
+      warnings: accumulator.warnings,
+      prodErrors: accumulator.prodErrors,
+      modules: [...accumulator.modules],
+      diagnostics: this.drainDiagnosticsCache(),
+    };
   }
 
   getLastHealthySnapshot(): IndexSnapshot | null {
@@ -293,8 +356,6 @@ export class TsReactIndexer {
       this.config = loadConfig(this.root);
       this.loadProjects();
       this.packageEntrypoints = this.collectPackageEntrypoints();
-      this.languageService.dispose();
-      this.languageService = this.createLanguageService();
       this.diagnosticsCache.clear();
       for (const file of this.fileList) {
         this.fileVersions.set(file, (this.fileVersions.get(file) ?? 0) + 1);
@@ -303,31 +364,30 @@ export class TsReactIndexer {
       return;
     }
 
+    let membershipChanged = false;
     for (const changed of changedFiles) {
       const absolute = canonicalPath(changed);
       if (fs.existsSync(absolute) && isSourceFile(absolute)) {
         const relative = toPosix(path.relative(this.root, absolute));
         if (!relative.startsWith("..") && isExcluded(relative, this.config)) continue;
+        if (!this.fileSet.has(absolute)) membershipChanged = true;
         this.fileVersions.set(absolute, (this.fileVersions.get(absolute) ?? 0) + 1);
-        if (!this.fileList.includes(absolute)) {
-          this.fileList.push(absolute);
-          this.fileList.sort();
-        }
         this.scriptSnapshots.delete(absolute);
         this.dirtyFiles.add(absolute);
         this.diagnosticsCache.delete(absolute);
       } else if (!fs.existsSync(absolute)) {
+        if (this.fileSet.has(absolute)) membershipChanged = true;
         this.fileVersions.delete(absolute);
         this.scriptSnapshots.delete(absolute);
-        this.fileList = this.fileList.filter((file) => file !== absolute);
         this.dirtyFiles.add(absolute);
         this.diagnosticsCache.delete(absolute);
       }
     }
 
-    // A newly added file can satisfy a module specifier that previously failed
-    // to resolve, so drop the resolver cache for this invalidation batch.
-    this.moduleResolutionCache.clear();
+    if (membershipChanged) {
+      this.loadProjects();
+      this.packageEntrypoints = this.collectPackageEntrypoints();
+    }
 
     // Type errors can surface in direct importers after a dependency changes.
     if (this.lastSnapshot) {
@@ -347,31 +407,331 @@ export class TsReactIndexer {
   buildIndex(options: IndexerOptions = {}): IndexSnapshot {
     const started = performance.now();
     const fullDiagnostics = options.fullDiagnostics ?? this.dirtyFiles.size === 0;
-    const program = this.languageService.getProgram();
-    if (!program) throw new Error("TypeScript LanguageService returned no program");
+    const accumulator = this.createAccumulator();
+    const workerResults = new Map<string, SerializedProjectIndex>();
 
-    const checker = program.getTypeChecker();
-    const symbols = new Map<string, SymbolRecord>();
-    const edges: EdgeRecord[] = [];
-    const fileImports: FileImportEdge[] = [];
-    const files = new Map<string, FileRecord>();
+    if (fullDiagnostics && this.parallel && this.activeProjects.length > 1 && this.workerScriptExists()) {
+      // Full worker builds return a complete replacement diagnostic set.
+      this.diagnosticsCache.clear();
+      for (const [projectPath, result] of this.indexProjectsInParallel()) {
+        workerResults.set(projectPath, result);
+      }
+    }
+
+    for (const project of this.activeProjects) {
+      const workerResult = workerResults.get(project.path);
+      if (workerResult) {
+        this.mergeSerializedProject(accumulator, workerResult);
+      } else {
+        this.mergeProject(accumulator, this.indexProjectLocal(project, fullDiagnostics));
+      }
+    }
+    this.dirtyFiles.clear();
+
+    const { symbols, edges, fileImports, files, modules: moduleSet, warnings, prodErrors } = accumulator;
+    const validEdges = edges.filter((edge) => symbols.has(edge.toId));
+    edges.length = 0;
+    edges.push(...validEdges);
+
+    // Count exports once after every project has contributed its symbols.
+    for (const symbol of symbols.values()) {
+      const fileRecord = files.get(symbol.file);
+      if (fileRecord && symbol.exported) fileRecord.exports++;
+    }
+
+    // Strong React/call edges take precedence over weak identifier references.
+    const strongLocations = new Set(
+      edges
+        .filter((edge) => edge.kind !== "references")
+        .map((edge) => `${edge.fromId}|${edge.toId}|${edge.file}:${edge.line}`)
+    );
+    const dedupedEdges = edges.filter(
+      (edge) =>
+        edge.kind !== "references" ||
+        !strongLocations.has(`${edge.fromId}|${edge.toId}|${edge.file}:${edge.line}`)
+    );
+    edges.length = 0;
+    edges.push(...dedupedEdges);
+
+    for (const edge of edges) {
+      const target = symbols.get(edge.toId);
+      if (!target) continue;
+      if (edge.kind === "calls" && target.kind === "hook") edge.kind = "uses_hook";
+      if (edge.kind === "renders" && target.kind === "context") edge.kind = "provides_context";
+    }
+
+    // Semantic hash chain.
+    computeGraphHashes(symbols, edges);
+
+    // Module cycles from production file imports.
+    const moduleEdges: Array<[string, string]> = [];
+    for (const edge of fileImports) {
+      if (edge.isTest) continue;
+      // `import type` is erased at runtime and cannot create a runtime module
+      // cycle. It still appears in the dependency graph for navigation.
+      if (edge.typeOnly) continue;
+      if (edge.fromModule !== edge.toModule) moduleEdges.push([edge.fromModule, edge.toModule]);
+    }
+    const moduleCycles = findDirectedCycles(moduleSet, moduleEdges);
+
+    const snapshot: IndexSnapshot = {
+      root: this.root,
+      projectId: this.projectId,
+      tsconfigPath: toPosix(path.relative(this.root, this.tsconfigPath)),
+      tsconfigPaths: this.tsconfigPaths.map((config) => toPosix(path.relative(this.root, config))),
+      projectConfigs: this.getProjectConfigs(),
+      typescriptVersion: ts.version,
+      indexedAt: new Date().toISOString(),
+      durationMs: Math.round(performance.now() - started),
+      symbols,
+      edges,
+      files,
+      fileImports,
+      moduleCycles,
+      warnings,
+      prodErrors,
+      filesCount: files.size,
+      modules: [...moduleSet].sort(),
+    };
+
+    this.lastSnapshot = snapshot;
+    if (prodErrors.length === 0) this.lastHealthySnapshot = snapshot;
+    return snapshot;
+  }
+
+  private createAccumulator(): IndexAccumulator {
+    return {
+      symbols: new Map(),
+      edges: [],
+      fileImports: [],
+      files: new Map(),
+      warnings: [],
+      prodErrors: [],
+      modules: new Set(),
+      declarationIds: new Map(),
+      pendingWraps: [],
+      seenFileImports: new Set(),
+      seenEdges: new Set(),
+      symbolBody: new Map(),
+    };
+  }
+
+  private indexProjectLocal(project: ParsedProject, fullDiagnostics: boolean): IndexAccumulator {
+    const accumulator = this.createAccumulator();
+    const languageService = this.createLanguageService(project);
+    try {
+      const program = languageService.getProgram();
+      if (!program) throw new Error(`TypeScript LanguageService returned no program for ${project.path}`);
+      this.indexProject(project, program, program.getTypeChecker(), accumulator, fullDiagnostics);
+    } finally {
+      languageService.dispose();
+    }
+    return accumulator;
+  }
+
+  private mergeProject(target: IndexAccumulator, source: IndexAccumulator): void {
+    for (const [id, symbol] of source.symbols) {
+      const existing = target.symbols.get(id);
+      if (!existing) {
+        target.symbols.set(id, symbol);
+        continue;
+      }
+      existing.exported ||= symbol.exported;
+      existing.defaultExport ||= symbol.defaultExport;
+      existing.isEntrypoint ||= symbol.isEntrypoint;
+    }
+    for (const edge of source.edges) {
+      const key = `${edge.fromId}|${edge.toId}|${edge.kind}|${edge.file}:${edge.line}|${edge.via ?? ""}`;
+      if (target.seenEdges.has(key)) continue;
+      target.seenEdges.add(key);
+      target.edges.push(edge);
+    }
+    for (const edge of source.fileImports) {
+      const key = `${edge.fromFile}|${edge.toFile}|${edge.line}|${edge.typeOnly ? "type" : "value"}`;
+      if (target.seenFileImports.has(key)) continue;
+      target.seenFileImports.add(key);
+      target.fileImports.push(edge);
+    }
+    for (const [file, record] of source.files) {
+      if (!target.files.has(file)) target.files.set(file, record);
+    }
+    target.warnings.push(...source.warnings);
+    target.prodErrors.push(...source.prodErrors);
+    for (const module of source.modules) target.modules.add(module);
+  }
+
+  private mergeSerializedProject(target: IndexAccumulator, source: SerializedProjectIndex): void {
+    for (const [id, symbol] of source.symbols) {
+      const existing = target.symbols.get(id);
+      if (!existing) {
+        target.symbols.set(id, symbol);
+        continue;
+      }
+      existing.exported ||= symbol.exported;
+      existing.defaultExport ||= symbol.defaultExport;
+      existing.isEntrypoint ||= symbol.isEntrypoint;
+    }
+    for (const edge of source.edges) {
+      const key = `${edge.fromId}|${edge.toId}|${edge.kind}|${edge.file}:${edge.line}|${edge.via ?? ""}`;
+      if (target.seenEdges.has(key)) continue;
+      target.seenEdges.add(key);
+      target.edges.push(edge);
+    }
+    for (const edge of source.fileImports) {
+      const key = `${edge.fromFile}|${edge.toFile}|${edge.line}|${edge.typeOnly ? "type" : "value"}`;
+      if (target.seenFileImports.has(key)) continue;
+      target.seenFileImports.add(key);
+      target.fileImports.push(edge);
+    }
+    for (const [file, record] of source.files) {
+      if (!target.files.has(file)) target.files.set(file, record);
+    }
+    target.warnings.push(...source.warnings);
+    target.prodErrors.push(...source.prodErrors);
+    for (const module of source.modules) target.modules.add(module);
+    for (const [file, diagnostic] of source.diagnostics) this.diagnosticsCache.set(file, diagnostic);
+  }
+
+  private workerScriptExists(): boolean {
+    try {
+      return fs.existsSync(fileURLToPath(new URL("./worker.js", import.meta.url)));
+    } catch {
+      return false;
+    }
+  }
+
+  private indexProjectsInParallel(): Map<string, SerializedProjectIndex> {
+    const results = new Map<string, SerializedProjectIndex>();
+    const projects = [...this.activeProjects].sort(
+      (a, b) => b.programFiles.length - a.programFiles.length || a.path.localeCompare(b.path)
+    );
+    const configured = Number(process.env.TSRAY_WORKERS ?? 0);
+    const cpuCount = os.availableParallelism?.() ?? os.cpus().length;
+    const memoryCount = Math.max(1, Math.floor(os.totalmem() / (2 * 1024 ** 3)));
+    const requested = configured > 0 ? Math.max(1, Math.floor(configured)) : Math.min(8, cpuCount);
+    const workerCount = Math.min(projects.length, requested, memoryCount);
+    if (workerCount < 2) return results;
+
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-index-"));
+    const signals = new Int32Array(
+      new SharedArrayBuffer(workerCount * 2 * Int32Array.BYTES_PER_ELEMENT)
+    );
+    const queue = new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT));
+    const workers: Worker[] = [];
+    const outputPaths: string[] = [];
+    const workerPath = fileURLToPath(new URL("./worker.js", import.meta.url));
+    const common = {
+      root: this.root,
+      workspace: this.workspace,
+      tsconfigPath: this.tsconfigPath,
+      fileVersions: [...this.fileVersions],
+      projects: projects.map((project) => ({ path: project.path })),
+    };
+
+    try {
+      for (let index = 0; index < workerCount; index++) {
+        const outputPath = path.join(temporary, `${index}.json`);
+        outputPaths[index] = outputPath;
+        const worker = new Worker(workerPath, {
+          workerData: {
+            ...common,
+            signal: signals.buffer,
+            signalIndex: index,
+            outputPath,
+            queue: queue.buffer,
+          },
+        });
+        // Errors are reported through the result file. The listener prevents an
+        // unhandled error while the main thread is synchronously waiting.
+        worker.on("error", () => {});
+        workers.push(worker);
+      }
+
+      const startupDeadline = Date.now() + 30_000;
+      for (let index = 0; index < workers.length; index++) {
+        const remaining = Math.max(0, startupDeadline - Date.now());
+        if (Atomics.wait(signals, index * 2, 0, remaining) === "timed-out") continue;
+      }
+      const completionDeadline = Date.now() + 900_000;
+      for (let index = 0; index < workers.length; index++) {
+        if (Atomics.load(signals, index * 2) === 0) continue;
+        const remaining = Math.max(0, completionDeadline - Date.now());
+        if (Atomics.wait(signals, index * 2, 1, remaining) === "timed-out") continue;
+      }
+
+      for (let index = 0; index < workers.length; index++) {
+        if (Atomics.load(signals, index * 2) !== 2) continue;
+        const outputPath = outputPaths[index];
+        if (!outputPath || !fs.existsSync(outputPath)) continue;
+        try {
+          const output = JSON.parse(fs.readFileSync(outputPath, "utf8")) as ProjectWorkerOutput;
+          for (const result of output.results ?? []) results.set(result.projectPath, result);
+        } catch {
+          // The parent indexes any missing project sequentially below.
+        }
+      }
+    } finally {
+      for (const worker of workers) void worker.terminate();
+      fs.rmSync(temporary, { recursive: true, force: true });
+    }
+
+    return results;
+  }
+
+  private indexProject(
+    project: ParsedProject,
+    program: ts.Program,
+    checker: ts.TypeChecker,
+    accumulator: IndexAccumulator,
+    fullDiagnostics: boolean
+  ): void {
+    const {
+      symbols,
+      edges,
+      fileImports,
+      files,
+      warnings,
+      prodErrors,
+      modules: moduleSet,
+      declarationIds,
+      pendingWraps,
+      seenFileImports,
+      seenEdges,
+      symbolBody,
+    } = accumulator;
+    const moduleResolutionCache = ts.createModuleResolutionCache(
+      this.root,
+      (fileName) => (ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()),
+      project.options
+    );
+    const ownedFiles = new Set(project.ownedFiles);
+    const sourceFiles = project.ownedFiles
+      .map((file) => program.getSourceFile(file))
+      .filter(
+        (sourceFile): sourceFile is ts.SourceFile =>
+          Boolean(sourceFile) &&
+          !sourceFile!.isDeclarationFile &&
+          ownedFiles.has(path.resolve(sourceFile!.fileName))
+      );
     const declToId = new Map<ts.Node, string>();
-    const moduleSet = new Set<string>();
-    const warnings: DiagnosticWarning[] = [];
-    const prodErrors: DiagnosticWarning[] = [];
-    const pendingWraps: PendingWrap[] = [];
-
-    const sourceFiles = program.getSourceFiles().filter((sourceFile) => {
-      if (sourceFile.isDeclarationFile) return false;
-      const absolute = path.resolve(sourceFile.fileName);
-      const relative = toPosix(path.relative(this.root, absolute));
-      if (relative.startsWith("..")) return false;
-      if (absolute.includes(`${path.sep}node_modules${path.sep}`)) return false;
-      return !isExcluded(relative, this.config);
-    });
 
     const relOf = (sourceFile: ts.SourceFile): string =>
       toPosix(path.relative(this.root, sourceFile.fileName));
+    const isTestFile = (sourceFile: ts.SourceFile): boolean => TEST_FILE_RE.test(relOf(sourceFile));
+    const resolveSymbolTarget = (
+      symbol: ts.Symbol,
+      _checker: ts.TypeChecker,
+      _declToId: Map<ts.Node, string>
+    ): string | null =>
+      resolveSymbolTargetByIdentity(symbol, checker, declToId, declarationIds, this.root);
+    const resolveDeclarationTarget = (
+      targetChecker: ts.TypeChecker,
+      node: ts.Node,
+      _declToId: Map<ts.Node, string>
+    ): string | null => {
+      const symbol = targetChecker.getSymbolAtLocation(node);
+      return symbol ? resolveSymbolTarget(symbol, targetChecker, _declToId) : null;
+    };
 
     // File records and diagnostics.
     for (const sourceFile of sourceFiles) {
@@ -413,46 +773,38 @@ export class TsReactIndexer {
       const absolute = path.resolve(sourceFile.fileName);
       const list = diagnosticsByFile.get(absolute) ?? [];
       for (const diagnostic of diagnostics) {
-        if (diagnostic.category === ts.DiagnosticCategory.Error) list.push(toWarning(diagnostic, sourceFile));
+        if (diagnostic.category !== ts.DiagnosticCategory.Error) continue;
+        if (project.references.length > 0 && [6305, 6307, 6310].includes(diagnostic.code)) continue;
+        list.push(toWarning(diagnostic, sourceFile));
       }
       diagnosticsByFile.set(absolute, list);
     };
 
-    if (fullDiagnostics) {
-      for (const diagnostic of program.getSyntacticDiagnostics()) {
-        if (diagnostic.category !== ts.DiagnosticCategory.Error || !diagnostic.file) continue;
-        if (!projectFileSet.has(path.resolve(diagnostic.file.fileName))) continue;
-        recordFileDiagnostics(diagnostic.file, [diagnostic]);
+    for (const sourceFile of sourceFiles) {
+      const absolute = path.resolve(sourceFile.fileName);
+      const version = String(this.fileVersions.get(absolute) ?? 0);
+      const cached = this.diagnosticsCache.get(absolute);
+      if (!fullDiagnostics && cached?.version === version) {
+        diagnosticsByFile.set(absolute, cached.diagnostics);
+        continue;
       }
-      for (const diagnostic of program.getSemanticDiagnostics()) {
-        if (diagnostic.category !== ts.DiagnosticCategory.Error || !diagnostic.file) continue;
-        if (!projectFileSet.has(path.resolve(diagnostic.file.fileName))) continue;
-        recordFileDiagnostics(diagnostic.file, [diagnostic]);
-      }
-    } else {
-      for (const sourceFile of sourceFiles) {
-        const absolute = path.resolve(sourceFile.fileName);
-        const version = String(this.fileVersions.get(absolute) ?? 0);
-        const cached = this.diagnosticsCache.get(absolute);
-        if (cached?.version === version) {
-          diagnosticsByFile.set(absolute, cached.diagnostics);
-          continue;
-        }
-        const syntactic = program.getSyntacticDiagnostics(sourceFile);
-        const semantic = program.getSemanticDiagnostics(sourceFile);
-        recordFileDiagnostics(sourceFile, [...syntactic, ...semantic]);
-        this.diagnosticsCache.set(absolute, {
-          version,
-          diagnostics: diagnosticsByFile.get(absolute) ?? [],
-        });
-      }
+      const syntactic = program.getSyntacticDiagnostics(sourceFile);
+      const semantic = program.getSemanticDiagnostics(sourceFile);
+      recordFileDiagnostics(sourceFile, [...syntactic, ...semantic]);
+      this.diagnosticsCache.set(absolute, {
+        version,
+        diagnostics: diagnosticsByFile.get(absolute) ?? [],
+      });
     }
 
     for (const diagnostic of [...program.getOptionsDiagnostics(), ...program.getGlobalDiagnostics()]) {
       if (diagnostic.category !== ts.DiagnosticCategory.Error) continue;
+      // Project-reference build diagnostics are irrelevant to a language-service
+      // index that never emits or requires prebuilt declaration outputs.
+      if (project.references.length > 0 && [6305, 6310].includes(diagnostic.code)) continue;
       const file = diagnostic.file
         ? toPosix(path.relative(this.root, diagnostic.file.fileName))
-        : toPosix(path.relative(this.root, this.tsconfigPath));
+        : toPosix(path.relative(this.root, project.path));
       prodErrors.push({
         file,
         line: diagnostic.file && diagnostic.start !== undefined
@@ -465,23 +817,13 @@ export class TsReactIndexer {
     }
 
     for (const sourceFile of sourceFiles) {
-      const absolute = path.resolve(sourceFile.fileName);
-      const version = String(this.fileVersions.get(absolute) ?? 0);
-      const entries = diagnosticsByFile.get(absolute) ?? [];
-      if (fullDiagnostics) {
-        this.diagnosticsCache.set(absolute, { version, diagnostics: entries });
-      }
+      const entries = diagnosticsByFile.get(path.resolve(sourceFile.fileName)) ?? [];
       for (const entry of entries) {
         if (entry.isTest) warnings.push(entry);
         else prodErrors.push(entry);
       }
     }
-    this.dirtyFiles.clear();
-
-    const isTestFile = (sourceFile: ts.SourceFile): boolean => TEST_FILE_RE.test(relOf(sourceFile));
-
     const fileId = (relative: string): string => `file:${relative}`;
-    const symbolBody = new Map<string, boolean>();
 
     const registerSymbol = (
       sourceFile: ts.SourceFile,
@@ -511,6 +853,7 @@ export class TsReactIndexer {
 
       if (existing && !hasBody && symbolBody.get(id) === true) {
         declToId.set(node, id);
+        declarationIds.set(declarationKey(node, this.root), id);
         if (exported) {
           existing.exported = true;
           if (files.get(relative)?.isEntrypoint) existing.isEntrypoint = true;
@@ -555,6 +898,7 @@ export class TsReactIndexer {
       };
       symbols.set(id, record);
       declToId.set(node, id);
+      declarationIds.set(declarationKey(node, this.root), id);
       symbolBody.set(id, hasBody);
       return id;
     };
@@ -813,20 +1157,14 @@ export class TsReactIndexer {
       }
     }
 
-    // File export counts and module assignment.
-    for (const symbol of symbols.values()) {
-      const fileRecord = files.get(symbol.file);
-      if (fileRecord && symbol.exported) fileRecord.exports++;
-    }
-
     // Add file import edges and symbol-level import/re-export edges.
     const addModuleResolution = (sourceFile: ts.SourceFile, specifier: string): string | null => {
       const resolved = ts.resolveModuleName(
         specifier,
         sourceFile.fileName,
-        this.compilerOptions,
+        project.options,
         ts.sys,
-        this.moduleResolutionCache
+        moduleResolutionCache
       ).resolvedModule;
       if (!resolved) return null;
       const absolute = path.resolve(resolved.resolvedFileName);
@@ -836,7 +1174,6 @@ export class TsReactIndexer {
       return relative;
     };
 
-    const seenFileImports = new Set<string>();
     const addFileImport = (
       sourceFile: ts.SourceFile,
       specifier: string,
@@ -864,7 +1201,6 @@ export class TsReactIndexer {
       return toFile;
     };
 
-    const seenEdges = new Set<string>();
     const addEdge = (
       fromId: string,
       toId: string,
@@ -875,7 +1211,6 @@ export class TsReactIndexer {
     ): void => {
       if (fromId === toId) return;
       if (!fromId.startsWith("file:") && !symbols.has(fromId)) return;
-      if (!symbols.has(toId)) return;
       const key = `${fromId}|${toId}|${kind}|${relative}:${line}|${via ?? ""}`;
       if (seenEdges.has(key)) return;
       seenEdges.add(key);
@@ -1103,101 +1438,61 @@ export class TsReactIndexer {
       }
     }
 
-    // Structural implementations via TypeChecker assignability.
-    const interfaceDecls: Array<{ id: string; type: ts.Type; node: ts.Node }> = [];
-    const candidateDecls: Array<{ id: string; type: ts.Type; symbol: SymbolRecord }> = [];
+    // Structural implementations are checked only inside the owning project.
+    // A required-property prefilter avoids the previous all-pairs type sweep.
+    const interfaceDecls: Array<{ id: string; type: ts.Type; required: Set<string> }> = [];
+    const candidateDecls: Array<{
+      id: string;
+      type: ts.Type;
+      symbol: SymbolRecord;
+      properties: Set<string>;
+    }> = [];
     const seenStructuralIds = new Set<string>();
     for (const [node, id] of declToId) {
       if (seenStructuralIds.has(id)) continue;
+      const sourceFile = node.getSourceFile();
+      if (!sourceFile || sourceFile.isDeclarationFile || !projectFileSet.has(path.resolve(sourceFile.fileName))) {
+        continue;
+      }
       const symbol = symbols.get(id);
-      if (!symbol || !node.getSourceFile() || node.getSourceFile().isDeclarationFile) continue;
+      if (!symbol) continue;
       seenStructuralIds.add(id);
       if (symbol.kind === "interface") {
         const type = checker.getTypeAtLocation(node);
-        // An interface with only optional/index members is assignable from
-        // almost any object and produces meaningless structural edges.
-        if (!hasRequiredMembers(type)) continue;
-        interfaceDecls.push({ id, type, node });
+        const required = requiredMemberNames(type);
+        if (required.size === 0) continue;
+        interfaceDecls.push({ id, type, required });
       } else if (symbol.kind === "class" || symbol.kind === "type") {
-        candidateDecls.push({ id, type: checker.getTypeAtLocation(node), symbol });
+        const type = checker.getTypeAtLocation(node);
+        candidateDecls.push({
+          id,
+          type,
+          symbol,
+          properties: new Set(type.getProperties().map((property) => property.name)),
+        });
       }
     }
 
-    if (interfaceDecls.length > 0 && candidateDecls.length > 0) {
-      for (const iface of interfaceDecls) {
-        for (const candidate of candidateDecls) {
-          if (iface.id === candidate.id) continue;
-          try {
-            if (checker.isTypeAssignableTo(candidate.type, iface.type)) {
-              addEdge(
-                candidate.id,
-                iface.id,
-                "implements",
-                candidate.symbol.file,
-                candidate.symbol.line,
-                "structural"
-              );
-            }
-          } catch {
-            // Generic or unresolved types can throw; skip them.
+    for (const iface of interfaceDecls) {
+      for (const candidate of candidateDecls) {
+        if (iface.id === candidate.id) continue;
+        if (![...iface.required].every((name) => candidate.properties.has(name))) continue;
+        try {
+          if (checker.isTypeAssignableTo(candidate.type, iface.type)) {
+            addEdge(
+              candidate.id,
+              iface.id,
+              "implements",
+              candidate.symbol.file,
+              candidate.symbol.line,
+              "structural"
+            );
           }
+        } catch {
+          // Generic or unresolved types can throw; skip them.
         }
       }
     }
-
-    // Drop weak `references` edges when a stronger semantic edge already
-    // describes the same source, target, file, and line. Without this a hook
-    // call would also count as a plain reference and inflate fan-in.
-    const strongLocations = new Set(
-      edges
-        .filter((edge) => edge.kind !== "references")
-        .map((edge) => `${edge.fromId}|${edge.toId}|${edge.file}:${edge.line}`)
-    );
-    const dedupedEdges = edges.filter(
-      (edge) =>
-        edge.kind !== "references" ||
-        !strongLocations.has(`${edge.fromId}|${edge.toId}|${edge.file}:${edge.line}`)
-    );
-    edges.length = 0;
-    edges.push(...dedupedEdges);
-
-    // Semantic hash chain.
-    computeGraphHashes(symbols, edges);
-
-    // Module cycles from production file imports.
-    const moduleEdges: Array<[string, string]> = [];
-    for (const edge of fileImports) {
-      if (edge.isTest) continue;
-      // `import type` is erased at runtime and cannot create a runtime module
-      // cycle. It still appears in the dependency graph for navigation.
-      if (edge.typeOnly) continue;
-      if (edge.fromModule !== edge.toModule) moduleEdges.push([edge.fromModule, edge.toModule]);
-    }
-    const moduleCycles = findDirectedCycles(moduleSet, moduleEdges);
-
-    const snapshot: IndexSnapshot = {
-      root: this.root,
-      projectId: this.projectId,
-      tsconfigPath: toPosix(path.relative(this.root, this.tsconfigPath)),
-      tsconfigPaths: this.tsconfigPaths.map((config) => toPosix(path.relative(this.root, config))),
-      projectConfigs: this.getProjectConfigs(),
-      typescriptVersion: ts.version,
-      indexedAt: new Date().toISOString(),
-      durationMs: Math.round(performance.now() - started),
-      symbols,
-      edges,
-      files,
-      fileImports,
-      moduleCycles,
-      warnings,
-      prodErrors,
-      filesCount: sourceFiles.length,
-      modules: [...moduleSet].sort(),
-    };
-
-    this.lastSnapshot = snapshot;
-    if (prodErrors.length === 0) this.lastHealthySnapshot = snapshot;
-    return snapshot;
   }
 }
 
@@ -1270,10 +1565,12 @@ function classApiSignature(
   return parts.join("; ");
 }
 
-function hasRequiredMembers(type: ts.Type): boolean {
-  const properties = type.getProperties();
-  if (properties.length === 0) return false;
-  return properties.some((property) => (property.flags & ts.SymbolFlags.Optional) === 0);
+function requiredMemberNames(type: ts.Type): Set<string> {
+  const names = new Set<string>();
+  for (const property of type.getProperties()) {
+    if ((property.flags & ts.SymbolFlags.Optional) === 0) names.add(property.name);
+  }
+  return names;
 }
 
 function isTypeOnlyImport(node: ts.ImportDeclaration): boolean {
@@ -1446,10 +1743,12 @@ function classifyClass(
   return { kind: "class", propsType: null, signature };
 }
 
-function resolveSymbolTarget(
+function resolveSymbolTargetByIdentity(
   symbol: ts.Symbol,
   checker: ts.TypeChecker,
-  declToId: Map<ts.Node, string>
+  declToId: Map<ts.Node, string>,
+  declarationIds: Map<string, string>,
+  root: string
 ): string | null {
   let current = symbol;
   if (current.flags & ts.SymbolFlags.Alias) {
@@ -1461,24 +1760,64 @@ function resolveSymbolTarget(
   }
   const declarations = current.getDeclarations() ?? [];
   for (const declaration of declarations) {
-    const direct = declToId.get(declaration);
+    const direct =
+      declToId.get(declaration) ??
+      declarationIds.get(declarationKey(declaration, root)) ??
+      symbolIdForDeclaration(declaration, root);
     if (direct) return direct;
     if (declaration.parent) {
-      const parent = declToId.get(declaration.parent);
+      const parent =
+        declToId.get(declaration.parent) ??
+        declarationIds.get(declarationKey(declaration.parent, root)) ??
+        symbolIdForDeclaration(declaration.parent, root);
       if (parent) return parent;
     }
   }
   return null;
 }
 
-function resolveDeclarationTarget(
-  checker: ts.TypeChecker,
-  node: ts.Node,
-  declToId: Map<ts.Node, string>
-): string | null {
-  const symbol = checker.getSymbolAtLocation(node);
-  if (!symbol) return null;
-  return resolveSymbolTarget(symbol, checker, declToId);
+function symbolIdForDeclaration(node: ts.Node, root: string): string | null {
+  const sourceFile = node.getSourceFile();
+  if (!sourceFile || sourceFile.isDeclarationFile) return null;
+  const relative = toPosix(path.relative(root, sourceFile.fileName));
+  if (relative.startsWith("..") || !isSourceFile(relative)) return null;
+  const fallbackName = pascalCase(path.basename(relative));
+  if (ts.isFunctionDeclaration(node)) {
+    return `sym:${relative}#${node.name?.text ?? fallbackName}`;
+  }
+  if (ts.isClassDeclaration(node)) {
+    return `sym:${relative}#${node.name?.text ?? fallbackName}`;
+  }
+  if (ts.isInterfaceDeclaration(node)) return `sym:${relative}#${node.name.text}`;
+  if (ts.isTypeAliasDeclaration(node)) return `sym:${relative}#${node.name.text}`;
+  if (ts.isEnumDeclaration(node)) return `sym:${relative}#${node.name.text}`;
+  if (ts.isVariableDeclaration(node) && ts.isIdentifier(node.name)) {
+    return `sym:${relative}#${node.name.text}`;
+  }
+  if (ts.isMethodDeclaration(node) && node.name && ts.isIdentifier(node.name)) {
+    const parent = node.parent;
+    if (parent && ts.isClassDeclaration(parent)) {
+      return `sym:${relative}:${parent.name?.text ?? fallbackName}#${node.name.text}`;
+    }
+  }
+  if (ts.isExportAssignment(node) && !node.isExportEquals) {
+    const expression = unwrapExpression(node.expression);
+    if (
+      ts.isArrowFunction(expression) ||
+      ts.isFunctionExpression(expression) ||
+      ts.isClassExpression(expression) ||
+      ts.isCallExpression(expression)
+    ) {
+      return `sym:${relative}#${fallbackName}`;
+    }
+  }
+  return null;
+}
+
+function declarationKey(node: ts.Node, root: string): string {
+  const sourceFile = node.getSourceFile();
+  const relative = toPosix(path.relative(root, sourceFile.fileName));
+  return `${relative}:${node.getStart(sourceFile)}:${node.end}:${node.kind}`;
 }
 
 function resolvedSymbolName(checker: ts.TypeChecker, node: ts.Node): string | null {

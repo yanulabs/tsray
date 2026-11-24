@@ -64,7 +64,7 @@ export class IndexController {
   status(): IndexControllerStatus {
     const state: IndexControllerStatus["index_state"] = this.building
       ? "indexing"
-      : this.lastError || this.latestProdErrors > 0
+      : this.lastError || (this.latestProdErrors > 0 && !this.indexer.allowErrors)
         ? "error"
         : this.snapshot
           ? "ready"
@@ -89,7 +89,7 @@ export class IndexController {
     this.building = Promise.resolve().then(() => {
       try {
         const snapshot = this.indexer.buildIndex(options);
-        const healthy = snapshot.prodErrors.length === 0;
+        const healthy = snapshot.prodErrors.length === 0 || this.indexer.allowErrors;
         this.latestProdErrors = snapshot.prodErrors.length;
         this.latestWarnings = snapshot.warnings.length;
         this.latestAttemptAt = snapshot.indexedAt;
@@ -98,7 +98,8 @@ export class IndexController {
           this.snapshot = snapshot;
           this.lastError = null;
           this.log(
-            `[tsray] indexed ${snapshot.symbols.size} symbols / ${snapshot.edges.length} edges in ${snapshot.durationMs}ms`
+            `[tsray] indexed ${snapshot.symbols.size} symbols / ${snapshot.edges.length} edges in ${snapshot.durationMs}ms` +
+              (snapshot.prodErrors.length > 0 ? ` (${snapshot.prodErrors.length} diagnostics)` : "")
           );
         } else {
           this.log(

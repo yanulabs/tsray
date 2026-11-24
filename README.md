@@ -125,19 +125,27 @@ The server exposes:
 
 The UI polls every 5 seconds, preserving the active view, filters, selection, and zoom.
 
-When production TypeScript errors appear after a healthy build, `tsray` keeps serving the
-last healthy report snapshot. `project_info.index_state` reports the latest attempt
-(`ready`, `indexing`, or `error`), with `prod_errors` / `current_prod_errors` for the current
-tree and `served_prod_errors` for the snapshot being served.
+When production TypeScript errors appear in a single-project index, `tsray` keeps serving the
+last healthy report snapshot. Workspace indexes are resilient by default: unrelated package
+errors are reported but do not prevent the semantic graph from updating. Pass
+`--allow-errors` or set `TSRAY_ALLOW_ERRORS=true` to opt into the same behavior for a single
+project. `project_info.index_state` reports the latest attempt (`ready`, `indexing`, or
+`error`), with `prod_errors` / `current_prod_errors` for the current tree and
+`served_prod_errors` for the snapshot being served.
 
 ### `index`
 
 Builds the index exactly once and syncs `working_symbols`, `working_edges`, and
 `working_files` to SQLite. It does not start the watcher, MCP, or HTTP server.
 
-Production TypeScript errors exit `1` and do **not** overwrite the last healthy working
-snapshot. Errors confined to test/story files become warnings and exit `0`. Use `--json` for
-machine-readable output.
+Single-project production TypeScript errors exit `1` and do **not** overwrite the last healthy
+working snapshot. Workspace indexes update by default and report diagnostics without
+blocking; use `--allow-errors` for the same behavior in a single project. Errors confined to
+test/story files become warnings and exit `0`. Use `--json` for machine-readable output.
+
+Full multi-project indexes use worker threads, bounded by available CPUs and memory (up to eight
+workers by default). Set `TSRAY_WORKERS=1` for sequential indexing or raise it when profiling a
+large workspace. Single-project and incremental rebuilds stay in the main process.
 
 ### `export`
 
@@ -627,6 +635,8 @@ then biome or eslint configs.
 | `TSRAY_PORT`, `TSRAY_PORT_RANGE`, `TSRAY_HOST` | Server bind settings |
 | `TSRAY_STRICT_PORT` | `true` to require the preferred port |
 | `TSRAY_PORT_FILE` | Port file path |
+| `TSRAY_ALLOW_ERRORS` | `true` updates workspace indexes even when production diagnostics exist |
+| `TSRAY_WORKERS` | Full multi-project index worker count; `1` disables worker parallelism |
 | `TSRAY_LOG_LEVEL` | `off`, `error`, `info` |
 | `TSRAY_REPORT_URL` | Written to stderr by `serve` so a dev proxy can follow a moved port |
 | `TSRAY_DEV_API` | Vite dev proxy target (web development only) |
@@ -676,14 +686,14 @@ scripts/      report embedding and executable post-build step
 
 ## Limitations
 
-- One merged LanguageService program is built for the root project plus referenced/workspace
-  tsconfigs. Per-package `paths` aliases are merged into the root options; unusual aliases
-  that collide across workspace packages may need `--workspace` or a dedicated tsconfig.
+- Workspace tsconfigs are indexed as separate LanguageService programs with their own compiler
+  options, module resolution, React type identities, and path aliases. Duplicate file ownership
+  is assigned to the broadest applicable config; cross-project symbol edges use stable IDs.
 - When a single package references sibling source projects, those files are used for type
   resolution but only files under the resolved project root are indexed. Use `--workspace`
   to index the whole graph.
-- Structural interface matching is intentionally broader than nominal `implements` checks;
-  review `via: "structural"` edges when they appear noisy.
+- Structural interface matching is project-local and intentionally broader than nominal
+  `implements` checks; review `via: "structural"` edges when they appear noisy.
 - Sources are indexed, not bundled. Runtime-only dynamic imports and non-literal module
   specifiers are not resolved.
 - `tsray` does not execute or evaluate code.

@@ -47,6 +47,7 @@ Common options:
   --db <path>                        Single database override (env: TSRAY_DB)
   --tsconfig <path>                  Explicit tsconfig (relative to the target path)
   --workspace                        Force workspace-root discovery
+  --allow-errors                     Update indexes despite type errors
   -o, --out <path>                   Write export output to a file
   --json                             Emit machine-readable JSON
 
@@ -106,6 +107,14 @@ function boolValue(value: string | boolean | undefined): boolean {
   return value === true;
 }
 
+function allowErrorsValue(values: Record<string, string | boolean | undefined>): boolean | undefined {
+  if (boolValue(values["allow-errors"])) return true;
+  const environment = process.env.TSRAY_ALLOW_ERRORS;
+  if (environment === "true") return true;
+  if (environment === "false") return false;
+  return undefined;
+}
+
 function storeOptions(values: Record<string, string | boolean | undefined>, indexer: TsReactIndexer): StoreOptions {
   return {
     overrideDb: stringValue(values.db) ?? process.env.TSRAY_DB,
@@ -117,6 +126,7 @@ function createContext(target: string, values: Record<string, string | boolean |
   const indexerOptions: IndexerOptions = {
     tsconfig: stringValue(values.tsconfig),
     workspace: boolValue(values.workspace),
+    allowErrors: allowErrorsValue(values),
   };
   const indexer = new TsReactIndexer(target, indexerOptions);
   const store = new DualCacheStore(indexer.root, indexer.projectId, storeOptions(values, indexer));
@@ -142,6 +152,7 @@ async function main(): Promise<void> {
       "port-file": { type: "string" },
       tsconfig: { type: "string" },
       workspace: { type: "boolean", default: false },
+      "allow-errors": { type: "boolean" },
       "log-level": { type: "string" },
       scope: { type: "string" },
       root: { type: "string" },
@@ -247,6 +258,7 @@ async function main(): Promise<void> {
     const indexerOptions: IndexerOptions = {
       tsconfig: stringValue(values.tsconfig),
       workspace: boolValue(values.workspace),
+      allowErrors: allowErrorsValue(values),
     };
     const indexer = new TsReactIndexer(target, indexerOptions);
     const store = new DualCacheStore(indexer.root, indexer.projectId, storeOptions(values, indexer));
@@ -298,18 +310,28 @@ async function main(): Promise<void> {
     const { indexer, store } = createContext(target, values);
     try {
       const snapshot = indexer.buildIndex({ fullDiagnostics: true });
-      for (const warning of snapshot.warnings) {
+      const diagnosticLimit = boolValue(values.json) ? 0 : 20;
+      for (const warning of snapshot.warnings.slice(0, diagnosticLimit)) {
         process.stderr.write(`[tsray] warning ${warning.file}:${warning.line} TS${warning.code} ${warning.message}\n`);
+      }
+      if (diagnosticLimit > 0 && snapshot.warnings.length > diagnosticLimit) {
+        process.stderr.write(`[tsray] ${snapshot.warnings.length - diagnosticLimit} more warning(s) omitted\n`);
       }
       if (snapshot.prodErrors.length > 0) {
         process.stderr.write(
-          `[tsray] ${snapshot.prodErrors.length} production TypeScript error(s); working database not updated\n`
+          `[tsray] ${snapshot.prodErrors.length} production TypeScript error(s); ` +
+            (indexer.allowErrors ? "index updated with diagnostics\n" : "working database not updated\n")
         );
-        for (const error of snapshot.prodErrors.slice(0, 50)) {
+        for (const error of snapshot.prodErrors.slice(0, diagnosticLimit)) {
           process.stderr.write(`[tsray] error ${error.file}:${error.line} TS${error.code} ${error.message}\n`);
         }
-        process.exitCode = 1;
-        return;
+        if (diagnosticLimit > 0 && snapshot.prodErrors.length > diagnosticLimit) {
+          process.stderr.write(`[tsray] ${snapshot.prodErrors.length - diagnosticLimit} more error(s) omitted\n`);
+        }
+        if (!indexer.allowErrors) {
+          process.exitCode = 1;
+          return;
+        }
       }
 
       store.syncWorking(snapshot);
