@@ -18,6 +18,7 @@ import { exportDot, exportHtml, exportJson, exportMarkdown, exportMermaid } from
 import { resolveProject } from "../util/paths.js";
 import { VERSION } from "../version.js";
 import { GitDiffError, diffMarkdown, runArchitecturalDiff } from "./diff.js";
+import { runMcpIntegration, runSkillIntegration } from "./integration.js";
 
 const USAGE = `tsray ${VERSION}
 
@@ -33,6 +34,12 @@ Commands:
                                      Export an architecture report
   diff [base-ref] [path]             Compare the working tree against a git ref
   db <path|info|rm|prune> [path]     Inspect or maintain local SQLite databases
+  install-mcp [targets...]           Register tsray with MCP clients
+  uninstall-mcp [targets...]         Remove tsray from MCP clients
+  mcp-status [targets...]            Show MCP registration status
+  install-skill [targets...]         Install the tsray agent skill
+  uninstall-skill [targets...]       Remove the tsray agent skill
+  skill-status [targets...]          Show skill installation status
   version                            Print the version
   help                               Show help
 
@@ -68,6 +75,22 @@ db options:
   --all                              Target working and summary databases
   --dry-run                          Print the deletion plan only
   --force                            Delete even when another process holds the DB
+
+integration options:
+  --scope <global|project>           Config scope (default: global)
+  --name <name>                      MCP server or skill name (default: tsray)
+  --target <target>                  Client target or comma-separated targets
+  --args <args>                      MCP server arguments (default: serve)
+  --command <path>                   Executable override
+  --cwd <path>                       Fixed server working directory
+  --config <path>                    Explicit client config file
+  --format <format>                  Config format for an explicit path
+  --dir <path>                       Explicit skill destination base
+  --mode <copy|link>                 Skill install mode (default: copy)
+  --project-root <path>              Project scope root (default: cwd)
+  --all                              Select every supported client
+  --dry-run                          Print planned changes without writing
+  --yes                              Skip interactive selection
 `;
 
 interface Context {
@@ -127,16 +150,26 @@ async function main(): Promise<void> {
       all: { type: "boolean", default: false },
       "dry-run": { type: "boolean", default: false },
       force: { type: "boolean", default: false },
+      name: { type: "string" },
+      target: { type: "string" },
+      args: { type: "string" },
+      command: { type: "string" },
+      cwd: { type: "string" },
+      config: { type: "string" },
+      mode: { type: "string" },
+      dir: { type: "string" },
+      "project-root": { type: "string" },
+      yes: { type: "boolean", default: false },
       version: { type: "boolean", short: "v", default: false },
       help: { type: "boolean", short: "h", default: false },
     },
   });
 
-  if (boolValue(values.version) && positionals.length === 0) {
+  if (boolValue(values.version)) {
     process.stdout.write(`${VERSION}\n`);
     return;
   }
-  if (boolValue(values.help) && positionals.length === 0) {
+  if (boolValue(values.help)) {
     process.stdout.write(USAGE);
     return;
   }
@@ -155,6 +188,57 @@ async function main(): Promise<void> {
 
   if (command === "help") {
     process.stdout.write(USAGE);
+    return;
+  }
+
+  if (command === "install-mcp" || command === "uninstall-mcp" || command === "mcp-status") {
+    const targetValue = stringValue(values.target) ?? process.env.TSRAY_MCP_TARGET;
+    const targets = [
+      ...rest,
+      ...(targetValue ? [targetValue] : []),
+      ...(boolValue(values.all) ? ["all"] : []),
+    ];
+    process.exitCode = await runMcpIntegration({
+      action: command === "install-mcp" ? "install" : command === "uninstall-mcp" ? "uninstall" : "status",
+      targets,
+      scope: (stringValue(values.scope) ?? process.env.TSRAY_MCP_SCOPE ?? "global") as "global" | "project",
+      name: stringValue(values.name) ?? process.env.TSRAY_MCP_NAME ?? "tsray",
+      format: stringValue(values.format) ?? process.env.TSRAY_MCP_FORMAT,
+      configPath: stringValue(values.config) ?? process.env.TSRAY_MCP_CONFIG,
+      command: stringValue(values.command) ?? process.env.TSRAY_MCP_COMMAND,
+      args: stringValue(values.args) ?? process.env.TSRAY_MCP_ARGS ?? "serve",
+      cwd: stringValue(values.cwd) ?? process.env.TSRAY_MCP_CWD,
+      projectRoot: stringValue(values["project-root"]) ?? process.env.TSRAY_PROJECT_ROOT ?? process.cwd(),
+      dryRun: boolValue(values["dry-run"]),
+      yes: boolValue(values.yes),
+      interactive: process.stdin.isTTY,
+    });
+    return;
+  }
+
+  if (
+    command === "install-skill" ||
+    command === "uninstall-skill" ||
+    command === "skill-status"
+  ) {
+    const targetValue = stringValue(values.target) ?? process.env.TSRAY_SKILL_TARGET;
+    const targets = [
+      ...rest,
+      ...(targetValue ? [targetValue] : []),
+      ...(boolValue(values.all) ? ["all"] : []),
+    ];
+    process.exitCode = await runSkillIntegration({
+      action: command === "install-skill" ? "install" : command === "uninstall-skill" ? "uninstall" : "status",
+      targets,
+      scope: (stringValue(values.scope) ?? process.env.TSRAY_SKILL_SCOPE ?? "global") as "global" | "project",
+      name: stringValue(values.name) ?? process.env.TSRAY_SKILL_NAME ?? "tsray",
+      directory: stringValue(values.dir) ?? process.env.TSRAY_SKILL_DIR,
+      mode: (stringValue(values.mode) ?? process.env.TSRAY_SKILL_MODE ?? "copy") as "copy" | "link",
+      projectRoot: stringValue(values["project-root"]) ?? process.env.TSRAY_PROJECT_ROOT ?? process.cwd(),
+      dryRun: boolValue(values["dry-run"]),
+      yes: boolValue(values.yes),
+      interactive: process.stdin.isTTY,
+    });
     return;
   }
 

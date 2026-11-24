@@ -39,6 +39,15 @@ Anti-patterns:
 2. If tools are missing, ask the user to register the stdio server:
 
    ```sh
+   npm run build
+   tsray install-mcp --target opencode --yes
+   tsray install-skill --target opencode --yes
+   opencode mcp list
+   ```
+
+   For Claude Code or another client, select the appropriate target or use:
+
+   ```sh
    claude mcp add --scope user tsray -- node /absolute/path/to/tsray/dist/cli/index.js serve
    ```
 
