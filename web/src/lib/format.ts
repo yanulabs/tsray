@@ -3,6 +3,14 @@ export function formatNumber(value: number): string {
   return new Intl.NumberFormat("en-US").format(Math.round(value));
 }
 
+export function formatCompact(value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  return new Intl.NumberFormat("en-US", {
+    notation: Math.abs(value) >= 100_000 ? "compact" : "standard",
+    maximumFractionDigits: 1,
+  }).format(value);
+}
+
 export function formatPercent(value: number, digits = 0): string {
   if (!Number.isFinite(value)) return "0%";
   return `${value.toFixed(digits)}%`;

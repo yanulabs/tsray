@@ -20,6 +20,40 @@ export function Badge({
   );
 }
 
+export function IconButton({
+  label,
+  onClick,
+  active = false,
+  disabled = false,
+  children,
+  className = "",
+}: {
+  label: string;
+  onClick: () => void;
+  active?: boolean;
+  disabled?: boolean;
+  children: ReactNode;
+  className?: string;
+}): React.ReactElement {
+  return (
+    <button
+      type="button"
+      title={label}
+      aria-label={label}
+      aria-pressed={active}
+      disabled={disabled}
+      onClick={onClick}
+      className={`inline-flex h-7 w-7 shrink-0 items-center justify-center rounded border transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${
+        active
+          ? "border-indigo-400 bg-indigo-50 text-indigo-700 dark:border-indigo-700 dark:bg-indigo-950 dark:text-indigo-300"
+          : "border-zinc-200 bg-white text-zinc-600 hover:border-zinc-300 hover:bg-zinc-100 dark:border-zinc-800 dark:bg-zinc-950 dark:text-zinc-400 dark:hover:border-zinc-700 dark:hover:bg-zinc-900"
+      } ${className}`}
+    >
+      {children}
+    </button>
+  );
+}
+
 export function Button({
   children,
   className = "",

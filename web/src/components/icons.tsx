@@ -147,6 +147,47 @@ export function ArrowRightIcon(props: IconProps): React.ReactElement {
   );
 }
 
+export function ArrowDownIcon(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M12 5v14M6 13l6 6 6-6" />
+    </Icon>
+  );
+}
+
+export function MinusIcon(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M5 12h14" />
+    </Icon>
+  );
+}
+
+export function PlusIcon(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M12 5v14M5 12h14" />
+    </Icon>
+  );
+}
+
+export function MaximizeIcon(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M8 3H3v5M16 3h5v5M3 16v5h5M21 16v5h-5" />
+    </Icon>
+  );
+}
+
+export function RotateCcwIcon(props: IconProps): React.ReactElement {
+  return (
+    <Icon {...props}>
+      <path d="M3 10a9 9 0 1 1 2.6 7.2" />
+      <path d="M3 4v6h6" />
+    </Icon>
+  );
+}
+
 export function ArrowLeftIcon(props: IconProps): React.ReactElement {
   return (
     <Icon {...props}>
