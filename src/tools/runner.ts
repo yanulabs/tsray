@@ -18,10 +18,49 @@ export interface CommandResult {
   duration_ms: number;
   stdout: string;
   stderr: string;
+  stdout_chars: number;
+  stderr_chars: number;
   truncated: boolean;
 }
 
 const MAX_OUTPUT = 200_000;
+const HEAD_OUTPUT = 140_000;
+const TAIL_OUTPUT = 60_000;
+
+class CapturedOutput {
+  private head = "";
+  private tail = "";
+  private totalChars = 0;
+  private truncated = false;
+
+  append(text: string): void {
+    this.totalChars += text.length;
+    if (!this.truncated) {
+      this.head += text;
+      if (this.head.length > MAX_OUTPUT) {
+        this.truncated = true;
+        this.tail = this.head.slice(-TAIL_OUTPUT);
+        this.head = this.head.slice(0, HEAD_OUTPUT);
+      }
+      return;
+    }
+    this.tail = `${this.tail}${text}`.slice(-TAIL_OUTPUT);
+  }
+
+  value(): string {
+    if (!this.truncated) return this.head;
+    const omitted = Math.max(0, this.totalChars - this.head.length - this.tail.length);
+    return `${this.head}\n… [${omitted} characters truncated]…\n${this.tail}`;
+  }
+
+  get chars(): number {
+    return this.totalChars;
+  }
+
+  get isTruncated(): boolean {
+    return this.truncated;
+  }
+}
 
 export async function runCommand(
   cwd: string,
@@ -57,30 +96,16 @@ export async function runCommand(
       child.kill(signal);
     };
 
-    let stdout = "";
-    let stderr = "";
-    let truncated = false;
     let timedOut = false;
     let settled = false;
-
-    const append = (current: string, chunk: Buffer): string => {
-      if (current.length >= MAX_OUTPUT) {
-        truncated = true;
-        return current;
-      }
-      const next = current + chunk.toString("utf8");
-      if (next.length > MAX_OUTPUT) {
-        truncated = true;
-        return next.slice(0, MAX_OUTPUT);
-      }
-      return next;
-    };
+    const stdout = new CapturedOutput();
+    const stderr = new CapturedOutput();
 
     child.stdout.on("data", (chunk: Buffer) => {
-      stdout = append(stdout, chunk);
+      stdout.append(chunk.toString("utf8"));
     });
     child.stderr.on("data", (chunk: Buffer) => {
-      stderr = append(stderr, chunk);
+      stderr.append(chunk.toString("utf8"));
     });
 
     const timer = setTimeout(() => {
@@ -99,14 +124,16 @@ export async function runCommand(
         exit_code: exitCode,
         timed_out: timedOut,
         duration_ms: Date.now() - started,
-        stdout,
-        stderr,
-        truncated,
+        stdout: stdout.value(),
+        stderr: stderr.value(),
+        stdout_chars: stdout.chars,
+        stderr_chars: stderr.chars,
+        truncated: stdout.isTruncated || stderr.isTruncated,
       });
     };
 
     child.on("error", (error) => {
-      stderr = append(stderr, Buffer.from(String(error)));
+      stderr.append(String(error));
       finish(null);
     });
     child.on("close", (code) => finish(code));

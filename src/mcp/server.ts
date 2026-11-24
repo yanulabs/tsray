@@ -264,6 +264,7 @@ function symbolPayload(snapshot: IndexSnapshot, id: string): Record<string, unkn
   const symbol = snapshot.symbols.get(id);
   if (!symbol) return { error: "symbol_not_found", id };
   const body = getFunctionBody(snapshot, id);
+  const impact = getImpactAnalysis(snapshot, id, 3);
   return {
     symbol: {
       id: symbol.id,
@@ -289,6 +290,6 @@ function symbolPayload(snapshot: IndexSnapshot, id: string): Record<string, unkn
     source: body?.source ?? symbol.sourcePreview,
     references: getReferences(snapshot, id, { limit: 100 }),
     component_tree: getComponentTree(snapshot, id, { depth: 2 }),
-    impact: getImpactAnalysis(snapshot, id, 3),
+    impact: { ...impact, directReferences: impact.directReferences.slice(0, 100) },
   };
 }

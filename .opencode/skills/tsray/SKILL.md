@@ -59,37 +59,51 @@ Anti-patterns:
      healthy snapshot on disk; test-only errors are warnings.
 
 `project_info` also reports tsconfig paths, workspace mode, TypeScript version, DB paths,
-summary prompt version, and the registered tool list.
+summary prompt version, and diagnostics. Compact mode returns `tool_count`; use
+`compact: false` when the registered tool-name list is needed.
 
 ## Tool catalog
 
 | Tool | Parameters |
 |---|---|
-| `project_info` | none. Readiness, counts, tsconfig paths, DB paths, diagnostics. |
-| `get_codebase_map` | `format` (`md` default, `json`, `dot`, `mermaid`), `top_modules` (`0` = all), `sort_by` (`loc`, `symbols`, `fan_in`, `fan_out`, `name`), `detail`, `summary_only`. |
-| `get_module_overview` | `module` (required), `format` (`json` default, `md`). Files, dependencies, hotspots. |
-| `get_dependency_graph` | `format` (`json`, `dot`, `mermaid`), `scope` (`module` default, `file`), `root`, `depth` (1-10), `direction` (`out`, `in`, `both`). |
-| `explain_dependency` | `from` and `to` module names, `include_tests` (default false). Exact file imports and symbol edges. |
-| `lookup_symbol` | `query` (canonical ID, name, file, fuzzy), `limit` (default 10). Returns hashes and staleness. |
-| `get_api_surface` | `module`, `kind`, `limit` (0 = unlimited), `offset`. |
-| `get_references` | `symbol_id` (or `symbolId`), `include_imports` (default false), `limit`. |
-| `get_call_graph` | `symbol_id`, `depth` (1-6), `direction` (`callers`, `callees`, `both`). |
-| `get_component_tree` | `symbol_id`, `depth`, `direction` (`children`, `parents`, `both`). React renders, hooks, contexts, wrappers. |
-| `find_implementations` | `symbol_id` optional; omit for the full interface matrix. |
-| `get_impact_analysis` | `symbol_id`, `max_depth` (default 4). Blast radius and suggested commands. |
-| `get_dead_code` | `include_exported` (default false), `module`, `kind`, `group_by` (`none`, `module`, `kind`), `limit`. |
-| `get_hotspots` | `limit`, `module`, `untested_only`, `min_complexity`, `sort_by` (`risk`, `complexity`, `loc`, `fan_in`). |
-| `get_function_body` | `symbol_id`. Source, LOC, complexity. |
-| `list_stale_summaries` | `limit`, `module`, `kind`. Missing/soft/hard stale summaries. |
-| `get_summary_context` | `symbol_ids` (batched, max 25) or `symbol_id`, `include_source`. Schema, hashes, source, dependencies. |
-| `upsert_summaries` | `entries` array: `symbol_id`, `summary`, `expected_content_hash` (or self+dep hashes), `model_id`. |
-| `get_summary_coverage` | `module` optional. |
-| `run_tests` | `timeout_seconds`. Detects package script, vitest, or jest. |
-| `run_typecheck` | `timeout_seconds`. Package script or local `tsc --noEmit`. |
-| `run_lint` | `timeout_seconds`. Package script, eslint, or biome. |
-| `reindex` | `full_diagnostics` (default true). Force a synchronous rebuild. |
+| `project_info` | `compact` (default true), `max_chars`. Readiness, counts, tsconfig paths, DB paths, diagnostics. |
+| `get_codebase_map` | `format` (`md` default, `json`, `dot`, `mermaid`), `top_modules` (`0` = all), `offset`, `edge_limit`, `edge_offset`, `sort_by`, `detail`, `summary_only`, `max_chars`. |
+| `get_module_overview` | `module` (required), `format`, `file_limit`, `file_offset`, `dependency_limit`, `dependency_offset`, `compact`, `max_chars`. |
+| `get_dependency_graph` | `format`, `scope`, `root`, `depth`, `direction`, `max_nodes`, `node_offset`, `max_edges`, `edge_offset`, `rank_limit`, `max_chars`. |
+| `explain_dependency` | `from`, `to`, `include_tests`, `limit`, `offset`, `symbol_limit`, `symbol_offset`, `max_chars`. |
+| `lookup_symbol` | `query`, `limit`, `offset`, `compact`, `include_source` (default false), `source_chars`, `max_chars`. Returns a paginated `symbols` envelope. |
+| `get_api_surface` | `module`, `kind`, `limit` (`0` = all remaining), `offset`, `compact`, `max_chars`. |
+| `get_references` | `symbol_id` (or `symbolId`), `include_imports`, `limit`, `offset`, `compact`, `max_chars`. |
+| `get_call_graph` | `symbol_id`, `depth`, `direction`, `max_nodes`, `node_offset`, `max_edges`, `edge_offset`, `max_chars`. |
+| `get_component_tree` | `symbol_id`, `depth`, `direction`, `max_nodes`, `node_offset`, `max_edges`, `edge_offset`, `context_limit`, `context_offset`, `hook_limit`, `hook_offset`, `compact`, `max_chars`. |
+| `find_implementations` | `symbol_id` optional, `limit`, `offset`, `implementation_limit`, `implementation_offset`, `max_chars`. |
+| `get_impact_analysis` | `symbol_id`, `max_depth`, `direct_limit`, `direct_offset`, `impact_limit`, `impact_offset`, `compact`, `max_chars`. |
+| `get_dead_code` | `include_exported`, `module`, `kind`, `group_by`, `limit`, `offset`, `max_chars`. |
+| `get_hotspots` | `limit`, `offset`, `module`, `untested_only`, `min_complexity`, `sort_by`, `max_chars`. |
+| `get_function_body` | `symbol_id`, `source_chars`, `compact`, `max_chars`. Source is explicit. |
+| `list_stale_summaries` | `limit`, `offset`, `module`, `kind`, `max_chars`. Returns a paginated `symbols` envelope. |
+| `get_summary_context` | `symbol_ids` (batched, max 25) or `symbol_id`, `include_source`, `source_chars`, `dependency_limit`, `dependency_offset`, `compact`, `max_chars`. Returns `{ total, returned, truncated, items }`. |
+| `upsert_summaries` | `entries` array: `symbol_id`, `summary`, `expected_content_hash` (or self+dep hashes), `model_id`; `max_chars`. |
+| `get_summary_coverage` | `module`, `compact` (default true), `max_chars`. |
+| `run_tests` | `timeout_seconds`, `output_chars`, `max_chars`. |
+| `run_typecheck` | `timeout_seconds`, `output_chars`, `max_chars`. |
+| `run_lint` | `timeout_seconds`, `output_chars`, `max_chars`. |
+| `reindex` | `full_diagnostics` (default true), `max_chars`. |
 
 JSON fields are snake_case. Symbol arguments accept either `symbol_id` or `symbolId`.
+
+## Response efficiency
+
+- Start with compact defaults and small limits. Follow `next_offset` only when another page
+  is actually needed.
+- Every tool accepts `max_chars` (1,000–200,000). Truncated JSON contains
+  `_response.truncated`, `_response.original_chars`, and `_response.max_chars`.
+- Graph tools use `max_nodes` / `max_edges` plus `node_offset` / `edge_offset`.
+- Source is opt-in for `lookup_symbol`; use `get_function_body` or
+  `get_summary_context` when source is genuinely required. Bound it with `source_chars`.
+- `run_tests`, `run_typecheck`, and `run_lint` keep the head and tail of each output stream;
+  bound each stream with `output_chars`.
+- Do not request `compact: false` unless the omitted metadata is needed.
 
 ## Canonical IDs
 
@@ -130,8 +144,9 @@ The server never generates prose. The client generates summaries.
    ```json
    {"symbol_ids":["sym:src/App.tsx#App"],"include_source":true}
    ```
-   Responses include the exact schema, hashes, staleness, previous summary, source, and
-   dependencies.
+   Responses return `{ total, returned, truncated, items }`. Each item includes the exact
+   schema, hashes, staleness, previous summary, bounded source, and a paginated `dependencies`
+   object (`items`, `total`, `offset`, `limit`, `next_offset`).
 3. Build the summary using the returned schema. Do not add fields.
    Callable (component, hook, function, method):
    ```json

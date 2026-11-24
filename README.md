@@ -385,6 +385,49 @@ claude mcp add --scope user tsray -- node /absolute/path/to/tsray/dist/cli/index
 Symbol arguments accept `symbol_id` (canonical ID or exact name) or the camelCase
 `symbolId` alias. JSON results use snake_case fields for parity with `goray`.
 
+### Agent response controls
+
+MCP tools default to compact, bounded responses so an agent can inspect a large repository
+without spending most of its context window on repetitive metadata.
+
+| Control | Behavior |
+| --- | --- |
+| `compact` | Defaults to `true` on symbol-heavy tools. Set `false` for full symbol metadata. |
+| `limit` / `offset` | Paginate symbol, file, edge, and audit results. |
+| `next_offset` | Cursor for the next page, or `null` when the collection is exhausted. |
+| `max_nodes` / `max_edges` | Bound graph payloads; use `node_offset` / `edge_offset` to continue. |
+| `max_chars` | Hard JSON/text response budget, from 1,000 to 200,000 characters. |
+| `include_source` | Source is opt-in for `lookup_symbol`; summary context includes it by default. |
+| `source_chars` | Bound source previews or function bodies independently of `max_chars`. |
+| `output_chars` | Per-stream command output budget for test/typecheck/lint tools. |
+
+Collection tools return `total`, `offset`, `limit`, `next_offset`, and `truncated` alongside
+their results. For example, `lookup_symbol` returns:
+
+```json
+{
+  "total": 3,
+  "offset": 0,
+  "limit": 10,
+  "next_offset": null,
+  "symbols": [{ "id": "sym:src/App.tsx#App", "name": "App", "kind": "component" }]
+}
+```
+
+If `max_chars` is reached, tsray first trims the largest collections and long strings, then
+falls back to a preview. Truncated JSON includes `_response.truncated`,
+`_response.original_chars`, `_response.max_chars`, and, when available,
+`_response.truncated_paths`. When a structured response is retained, pagination totals remain
+authoritative; the final preview fallback can omit them.
+
+Command tools retain both the beginning and end of stdout/stderr, because test and type
+errors often appear at the end. They also return `stdout_original_chars`,
+`stderr_original_chars`, and an overall `truncated` flag.
+
+Source is never included accidentally in compact symbol, reference, graph, or impact
+results. Request it explicitly with `lookup_symbol(include_source: true)`,
+`get_function_body`, or `get_summary_context`.
+
 ### Canonical IDs
 
 ```text

@@ -677,7 +677,7 @@ export function getImpactAnalysis(
     target,
     risk,
     directReferencesCount: direct.length,
-    directReferences: direct.slice(0, 100),
+    directReferences: direct,
     impactedComponents: [...impactedComponents.values()].sort(bySymbol),
     impactedHooks: [...impactedHooks.values()].sort(bySymbol),
     impactedCallers: [...impactedCallers.values()].sort(bySymbol),

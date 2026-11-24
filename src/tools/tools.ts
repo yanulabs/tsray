@@ -1,10 +1,17 @@
 import { z } from "zod";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
-import type { DualCacheStore, SummaryUpsertEntry } from "../cache/store.js";
+import type { DualCacheStore, SummaryCoverage, SummaryUpsertEntry } from "../cache/store.js";
 import { SUMMARY_SCHEMA, isCallableKind } from "../cache/summary.js";
 import type { IndexController } from "../index/watch.js";
-import type { IndexSnapshot, SymbolRecord } from "../index/types.js";
+import type {
+  HotspotRecord,
+  ImpactSymbol,
+  IndexSnapshot,
+  ModuleEdgeSummary,
+  ModuleSummary,
+  SymbolRecord,
+} from "../index/types.js";
 import {
   explainDependency,
   findImplementations,
@@ -24,23 +31,33 @@ import {
   getSymbolDependencies,
   getSymbolMatches,
 } from "../index/queries.js";
-import {
-  buildReportPayload,
-  exportDot,
-  exportMarkdown,
-  exportMermaid,
-} from "../render/exporters.js";
+import { exportDot, exportMarkdown, exportMermaid } from "../render/exporters.js";
 import { detectLintRunner, detectTestRunner, detectTypecheckRunner, runCommand } from "./runner.js";
+import type { CommandResult } from "./runner.js";
+import {
+  compactEdge,
+  compactSymbol,
+  jsonToolResult,
+  paginate,
+  textToolResult,
+  truncateLog,
+  truncateText,
+} from "./response.js";
 import { VERSION } from "../version.js";
 
 type ToolArgs = Record<string, unknown>;
 
-function jsonResult(value: unknown): CallToolResult {
-  return { content: [{ type: "text", text: JSON.stringify(value, null, 2) }] };
+const compactTrue = z.boolean().default(true);
+const maxCharsOptional = z.number().int().min(1000).max(200_000).optional();
+const outputChars = z.number().int().min(0).max(100_000).default(12_000);
+const offsetOptional = z.number().int().min(0).default(0);
+
+function jsonResult(value: unknown, maxChars = Number.POSITIVE_INFINITY): CallToolResult {
+  return jsonToolResult(value, maxChars);
 }
 
-function textResult(text: string): CallToolResult {
-  return { content: [{ type: "text", text }] };
+function textResult(text: string, maxChars = Number.POSITIVE_INFINITY): CallToolResult {
+  return textToolResult(text, maxChars);
 }
 
 function errorResult(value: unknown): CallToolResult {
@@ -154,37 +171,164 @@ function leanSymbol(snapshot: IndexSnapshot, store: DualCacheStore, symbol: Symb
   };
 }
 
+function symbolResult(
+  snapshot: IndexSnapshot,
+  store: DualCacheStore,
+  symbol: SymbolRecord,
+  compact = false
+): Record<string, unknown> {
+  return compact
+    ? compactSymbol(symbol, store.getStaleness(symbol))
+    : leanSymbol(snapshot, store, symbol);
+}
+
 function symbolDependencyContext(
   snapshot: IndexSnapshot,
   store: DualCacheStore,
-  symbolId: string
-): Array<Record<string, unknown>> {
+  symbolId: string,
+  options: { limit?: number; offset?: number; includeSource?: boolean; compact?: boolean } = {}
+): {
+  items: Array<Record<string, unknown>>;
+  total: number;
+  offset: number;
+  limit: number;
+  next_offset: number | null;
+  truncated: boolean;
+} {
   const dependencies = getSymbolDependencies(snapshot, symbolId);
   const seen = new Set<string>();
-  const out: Array<Record<string, unknown>> = [];
+  const unique: Array<{ target: SymbolRecord; edgeKind: string }> = [];
   for (const dependency of dependencies) {
     const key = `${dependency.id}|${dependency.edge_kind}`;
     if (seen.has(key)) continue;
     seen.add(key);
-    if (out.length >= 50) break;
     const target = snapshot.symbols.get(dependency.id);
-    if (!target) continue;
-    const resolved = store.resolveSummary(target);
-    out.push({
-      id: target.id,
-      name: target.name,
-      kind: target.kind,
-      module: target.module,
-      file: target.file,
-      line: target.line,
-      edge_kind: dependency.edge_kind,
-      eligible: target.eligible,
-      sync_state: resolved.state,
-      summary: resolved.summary,
-      source: target.eligible ? undefined : target.sourcePreview,
-    });
+    if (target) unique.push({ target, edgeKind: dependency.edge_kind });
   }
-  return out;
+  const page = paginate(unique, options.offset ?? 0, options.limit ?? 25);
+  const items = page.items.map(({ target, edgeKind }) => {
+    const resolved = store.resolveSummary(target);
+    return {
+      ...symbolResult(snapshot, store, target, options.compact ?? false),
+      edge_kind: edgeKind,
+      summary: resolved.summary,
+      source:
+        options.includeSource && !target.eligible
+          ? truncateText(target.sourcePreview, 2000).text
+          : undefined,
+    };
+  });
+  return {
+    items,
+    total: page.total,
+    offset: page.offset,
+    limit: page.limit,
+    next_offset: page.next_offset,
+    truncated: page.truncated,
+  };
+}
+
+function compactModuleSummary(module: ModuleSummary): Record<string, unknown> {
+  return {
+    name: module.name,
+    files: module.files,
+    symbols: module.symbols,
+    components: module.components,
+    hooks: module.hooks,
+    exported: module.exported,
+    prod_loc: module.prodLoc,
+    test_loc: module.testLoc,
+    fan_in: module.fanIn,
+    fan_out: module.fanOut,
+    entrypoints: module.entrypoints,
+    generated_files: module.generatedFiles,
+    test_reachable: module.testReachable,
+    in_modules: module.inModules,
+    out_modules: module.outModules,
+  };
+}
+
+function fullModuleSummary(module: ModuleSummary): Record<string, unknown> {
+  return { ...compactModuleSummary(module), loc: module.loc };
+}
+
+function compactModuleEdge(edge: ModuleEdgeSummary, compact: boolean): Record<string, unknown> {
+  return {
+    from: edge.from,
+    to: edge.to,
+    imports: edge.imports,
+    symbols: edge.symbols,
+    ...(compact ? { files_count: edge.files.length } : { files: edge.files }),
+  };
+}
+
+function hotspotResult(hotspot: HotspotRecord): Record<string, unknown> {
+  return {
+    id: hotspot.id,
+    name: hotspot.name,
+    kind: hotspot.kind,
+    module: hotspot.module,
+    file: hotspot.file,
+    line: hotspot.line,
+    loc: hotspot.loc,
+    complexity: hotspot.complexity,
+    fan_in: hotspot.fanIn,
+    test_reachable: hotspot.testReachable,
+    risk_score: hotspot.riskScore,
+  };
+}
+
+function impactSymbolResult(symbol: ImpactSymbol): Record<string, unknown> {
+  return {
+    id: symbol.id,
+    name: symbol.name,
+    kind: symbol.kind,
+    module: symbol.module,
+    file: symbol.file,
+    line: symbol.line,
+    is_test: symbol.isTest,
+  };
+}
+
+function compactCoverage(coverage: SummaryCoverage): Record<string, unknown> {
+  return {
+    eligible: coverage.eligible,
+    synced: coverage.synced,
+    soft_stale: coverage.soft_stale,
+    hard_stale: coverage.hard_stale,
+    missing: coverage.missing,
+    not_eligible: coverage.not_eligible,
+    percent: coverage.percent,
+  };
+}
+
+function commandResult(
+  runner: string,
+  result: CommandResult,
+  outputLimit: number,
+  maxChars: number
+): CallToolResult {
+  let streamLimit = outputLimit;
+  let payload: Record<string, unknown> = {};
+  for (let attempt = 0; attempt < 12; attempt++) {
+    const stdout = truncateLog(result.stdout, streamLimit);
+    const stderr = truncateLog(result.stderr, streamLimit);
+    payload = {
+      runner,
+      command: result.command,
+      exit_code: result.exit_code,
+      timed_out: result.timed_out,
+      duration_ms: result.duration_ms,
+      stdout: stdout.text,
+      stderr: stderr.text,
+      stdout_original_chars: result.stdout_chars,
+      stderr_original_chars: result.stderr_chars,
+      truncated: result.truncated || stdout.truncated || stderr.truncated,
+    };
+    if (!Number.isFinite(maxChars) || JSON.stringify(payload, null, 2).length <= maxChars) break;
+    streamLimit = Math.floor(streamLimit / 2);
+  }
+  return jsonResult(payload, maxChars);
 }
 
 function moduleMarkdown(snapshot: IndexSnapshot, moduleName: string): string {
@@ -264,36 +408,70 @@ export function registerMcpTools(
     );
   };
 
-  register("project_info", "Index state, project metadata, DB paths, symbol counts, and diagnostics.", {}, async () => {
-    const snapshot = await controller.getSnapshot();
-    return jsonResult({
-      version: VERSION,
-      project_id: snapshot.projectId,
-      root: snapshot.root,
-      tsconfig_path: snapshot.tsconfigPath,
-      tsconfig_paths: snapshot.tsconfigPaths,
-      project_configs: snapshot.projectConfigs,
-      workspace: controller.indexer.workspace,
-      typescript_version: snapshot.typescriptVersion,
-      index_state: controller.status(),
-      indexed_at: snapshot.indexedAt,
-      duration_ms: snapshot.durationMs,
-      files: snapshot.filesCount,
-      modules: snapshot.modules.length,
-      symbols: snapshot.symbols.size,
-      edges: snapshot.edges.length,
-      eligible: [...snapshot.symbols.values()].filter((symbol) => symbol.eligible).length,
-      summary_prompt_version: store.promptVersion,
-      tools: tools.slice(),
-      prod_errors: snapshot.prodErrors.slice(0, 20),
-      warnings: snapshot.warnings.slice(0, 20),
-      current_prod_errors:
-        controller.status().prod_errors > 0
-          ? controller.indexer.getLastSnapshot()?.prodErrors.slice(0, 20) ?? []
-          : [],
-      storage: store.getInfo(),
-    });
-  });
+  register(
+    "project_info",
+    "Index state, project metadata, DB paths, symbol counts, and diagnostics.",
+    { compact: compactTrue, max_chars: maxCharsOptional },
+    async (args) => {
+      const snapshot = await controller.getSnapshot();
+      const status = controller.status();
+      const compact = boolArg(args, "compact", true);
+      const diagnostics = {
+        prod_errors: snapshot.prodErrors.slice(0, 20),
+        warnings: snapshot.warnings.slice(0, 20),
+        current_prod_errors:
+          status.prod_errors > 0
+            ? controller.indexer.getLastSnapshot()?.prodErrors.slice(0, 20) ?? []
+            : [],
+      };
+      return jsonResult(
+        compact
+          ? {
+              version: VERSION,
+              project_id: snapshot.projectId,
+              root: snapshot.root,
+              tsconfig_path: snapshot.tsconfigPath,
+              workspace: controller.indexer.workspace,
+              typescript_version: snapshot.typescriptVersion,
+              index_state: status,
+              indexed_at: snapshot.indexedAt,
+              duration_ms: snapshot.durationMs,
+              files: snapshot.filesCount,
+              modules: snapshot.modules.length,
+              symbols: snapshot.symbols.size,
+              edges: snapshot.edges.length,
+              eligible: [...snapshot.symbols.values()].filter((symbol) => symbol.eligible).length,
+              summary_prompt_version: store.promptVersion,
+              tool_count: tools.length,
+              diagnostics,
+              storage: store.getInfo(),
+            }
+          : {
+              version: VERSION,
+              project_id: snapshot.projectId,
+              root: snapshot.root,
+              tsconfig_path: snapshot.tsconfigPath,
+              tsconfig_paths: snapshot.tsconfigPaths,
+              project_configs: snapshot.projectConfigs,
+              workspace: controller.indexer.workspace,
+              typescript_version: snapshot.typescriptVersion,
+              index_state: status,
+              indexed_at: snapshot.indexedAt,
+              duration_ms: snapshot.durationMs,
+              files: snapshot.filesCount,
+              modules: snapshot.modules.length,
+              symbols: snapshot.symbols.size,
+              edges: snapshot.edges.length,
+              eligible: [...snapshot.symbols.values()].filter((symbol) => symbol.eligible).length,
+              summary_prompt_version: store.promptVersion,
+              tools: tools.slice(),
+              ...diagnostics,
+              storage: store.getInfo(),
+            },
+        numberArg(args, "max_chars", 20_000)
+      );
+    }
+  );
 
   register(
     "get_codebase_map",
@@ -304,13 +482,18 @@ export function registerMcpTools(
       sort_by: z.enum(["loc", "symbols", "fan_in", "fan_out", "name"]).default("loc"),
       detail: z.enum(["compact", "full"]).default("compact"),
       summary_only: z.boolean().default(false),
+      offset: offsetOptional,
+      edge_limit: z.number().int().min(1).max(1000).default(200),
+      edge_offset: offsetOptional,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
+      const maxChars = numberArg(args, "max_chars", 30_000);
       const format = stringArg(args, "format") ?? "md";
-      if (format === "md") return textResult(exportMarkdown(snapshot, store));
-      if (format === "dot") return textResult(exportDot(snapshot, { scope: "module" }));
-      if (format === "mermaid") return textResult(exportMermaid(snapshot, { scope: "module" }));
+      if (format === "md") return textResult(exportMarkdown(snapshot, store), maxChars);
+      if (format === "dot") return textResult(exportDot(snapshot, { scope: "module" }), maxChars);
+      if (format === "mermaid") return textResult(exportMermaid(snapshot, { scope: "module" }), maxChars);
 
       const sortBy = stringArg(args, "sort_by") ?? "loc";
       const moduleSummaries = getModuleSummaries(snapshot).sort((a, b) => {
@@ -327,18 +510,58 @@ export function registerMcpTools(
             return b.prodLoc - a.prodLoc;
         }
       });
-      const topModules = numberArg(args, "top_modules", 0);
-      const selected = topModules > 0 ? moduleSummaries.slice(0, topModules) : moduleSummaries;
-      const payload = buildReportPayload(snapshot, store);
-      return jsonResult({
-        metrics: payload.metrics,
-        coverage: payload.coverage,
-        modules: selected,
-        module_edges: getModuleEdges(snapshot),
-        module_cycles: snapshot.moduleCycles,
-        hotspots: boolArg(args, "summary_only", false) ? [] : payload.hotspots.slice(0, 20),
-        detail: stringArg(args, "detail") ?? "compact",
-      });
+      const requestedLimit = numberArg(args, "top_modules", 0);
+      const modulePage = paginate(
+        moduleSummaries,
+        numberArg(args, "offset", 0),
+        requestedLimit > 0 ? requestedLimit : moduleSummaries.length
+      );
+      const coverage = store.getCoverage(snapshot);
+      const detail = stringArg(args, "detail") ?? "compact";
+      const compact = detail === "compact";
+      const edgePage = paginate(
+        getModuleEdges(snapshot),
+        numberArg(args, "edge_offset", 0),
+        numberArg(args, "edge_limit", 200)
+      );
+      const symbols = [...snapshot.symbols.values()];
+      return jsonResult(
+        {
+          metrics: {
+            files: snapshot.filesCount,
+            symbols: symbols.length,
+            components: symbols.filter((symbol) => symbol.kind === "component" && !symbol.isTest).length,
+            hooks: symbols.filter((symbol) => symbol.kind === "hook" && !symbol.isTest).length,
+            contexts: symbols.filter((symbol) => symbol.kind === "context" && !symbol.isTest).length,
+            edges: snapshot.edges.length,
+            modules: snapshot.modules.length,
+            cycles: snapshot.moduleCycles.length,
+            dead: getDeadCode(snapshot, false).length,
+            prod_errors: snapshot.prodErrors.length,
+            warnings: snapshot.warnings.length,
+            loc: moduleSummaries.reduce((total, module) => total + module.prodLoc, 0),
+          },
+          coverage: compact ? compactCoverage(coverage) : coverage,
+          modules: modulePage.items.map((module) =>
+            compact ? compactModuleSummary(module) : fullModuleSummary(module)
+          ),
+          total_modules: modulePage.total,
+          offset: modulePage.offset,
+          limit: modulePage.limit,
+          next_offset: modulePage.next_offset,
+          module_edges: edgePage.items.map((edge) => compactModuleEdge(edge, compact)),
+          total_module_edges: edgePage.total,
+          edge_offset: edgePage.offset,
+          edge_limit: edgePage.limit,
+          next_edge_offset: edgePage.next_offset,
+          module_cycles: snapshot.moduleCycles,
+          hotspots: boolArg(args, "summary_only", false)
+            ? []
+            : getHotspots(snapshot, 20).map(hotspotResult),
+          detail,
+        },
+        maxChars
+      );
     }
   );
 
@@ -348,13 +571,52 @@ export function registerMcpTools(
     {
       module: z.string(),
       format: z.enum(["md", "json"]).default("json"),
+      file_limit: z.number().int().min(1).max(1000).default(100),
+      file_offset: offsetOptional,
+      dependency_limit: z.number().int().min(1).max(1000).default(100),
+      dependency_offset: offsetOptional,
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const moduleName = stringArg(args, "module");
       if (!moduleName) return errorResult({ error: "module_required" });
-      if (stringArg(args, "format") === "md") return textResult(moduleMarkdown(snapshot, moduleName));
-      return jsonResult(getModuleOverview(snapshot, moduleName));
+      const maxChars = numberArg(args, "max_chars", 20_000);
+      if (stringArg(args, "format") === "md") return textResult(moduleMarkdown(snapshot, moduleName), maxChars);
+      const overview = getModuleOverview(snapshot, moduleName);
+      const compact = boolArg(args, "compact", true);
+      const filePage = paginate(
+        overview.files,
+        numberArg(args, "file_offset", 0),
+        numberArg(args, "file_limit", 100)
+      );
+      const dependencyPage = paginate(
+        overview.dependencies,
+        numberArg(args, "dependency_offset", 0),
+        numberArg(args, "dependency_limit", 100)
+      );
+      return jsonResult(
+        {
+          module: overview.module
+            ? compact
+              ? compactModuleSummary(overview.module)
+              : fullModuleSummary(overview.module)
+            : null,
+          dependencies: dependencyPage.items.map((edge) => compactModuleEdge(edge, compact)),
+          total_dependencies: dependencyPage.total,
+          dependency_offset: dependencyPage.offset,
+          dependency_limit: dependencyPage.limit,
+          next_dependency_offset: dependencyPage.next_offset,
+          hotspots: overview.hotspots.map(hotspotResult),
+          files: filePage.items,
+          total_files: filePage.total,
+          file_offset: filePage.offset,
+          file_limit: filePage.limit,
+          next_file_offset: filePage.next_offset,
+        },
+        maxChars
+      );
     }
   );
 
@@ -367,21 +629,59 @@ export function registerMcpTools(
       root: z.string().optional(),
       depth: z.number().int().min(1).max(10).default(2),
       direction: z.enum(["out", "in", "both"]).default("both"),
+      max_nodes: z.number().int().min(1).max(5000).default(500),
+      max_edges: z.number().int().min(1).max(20_000).default(2000),
+      node_offset: offsetOptional,
+      edge_offset: offsetOptional,
+      rank_limit: z.number().int().min(1).max(1000).default(100),
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
+      const maxChars = numberArg(args, "max_chars", 30_000);
       const format = stringArg(args, "format") ?? "json";
       const scope = (stringArg(args, "scope") as "module" | "file" | undefined) ?? "module";
       const root = stringArg(args, "root");
       const depth = numberArg(args, "depth", 2);
       const direction = (stringArg(args, "direction") as "out" | "in" | "both" | undefined) ?? "both";
       if (format === "dot") {
-        return textResult(exportDot(snapshot, { scope, root, depth, direction }));
+        return textResult(exportDot(snapshot, { scope, root, depth, direction }), maxChars);
       }
       if (format === "mermaid") {
-        return textResult(exportMermaid(snapshot, { scope, root, depth, direction }));
+        return textResult(exportMermaid(snapshot, { scope, root, depth, direction }), maxChars);
       }
-      return jsonResult(getDependencyGraph(snapshot, { scope, root, depth, direction }));
+      const graph = getDependencyGraph(snapshot, { scope, root, depth, direction });
+      const nodePage = paginate(
+        graph.nodes,
+        numberArg(args, "node_offset", 0),
+        numberArg(args, "max_nodes", 500)
+      );
+      const allowed = new Set(nodePage.items.map((node) => node.id));
+      const pageEdges = graph.edges.filter((edge) => allowed.has(edge.from) && allowed.has(edge.to));
+      const edgePage = paginate(
+        pageEdges,
+        numberArg(args, "edge_offset", 0),
+        numberArg(args, "max_edges", 2000)
+      );
+      return jsonResult(
+        {
+          scope,
+          nodes: nodePage.items,
+          edges: edgePage.items,
+          rank: graph.rank.slice(0, numberArg(args, "rank_limit", 100)),
+          total_nodes: nodePage.total,
+          node_offset: nodePage.offset,
+          node_limit: nodePage.limit,
+          next_node_offset: nodePage.next_offset,
+          total_edges: graph.edges.length,
+          page_total_edges: pageEdges.length,
+          edge_offset: edgePage.offset,
+          edge_limit: edgePage.limit,
+          next_edge_offset: edgePage.next_offset,
+          truncated: nodePage.truncated || edgePage.truncated || pageEdges.length !== graph.edges.length,
+        },
+        maxChars
+      );
     }
   );
 
@@ -392,16 +692,55 @@ export function registerMcpTools(
       from: z.string(),
       to: z.string(),
       include_tests: z.boolean().default(false),
+      limit: z.number().int().min(1).max(1000).default(100),
+      offset: offsetOptional,
+      symbol_limit: z.number().int().min(1).max(1000).default(100),
+      symbol_offset: offsetOptional,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const from = stringArg(args, "from");
       const to = stringArg(args, "to");
       if (!from || !to) return errorResult({ error: "from_and_to_required" });
+      const result = explainDependency(snapshot, from, to, {
+        includeTests: boolArg(args, "include_tests", false),
+      });
+      const page = paginate(
+        result.file_imports,
+        numberArg(args, "offset", 0),
+        numberArg(args, "limit", 100)
+      );
+      const symbolPage = paginate(
+        result.symbol_edges,
+        numberArg(args, "symbol_offset", 0),
+        numberArg(args, "symbol_limit", 100)
+      );
+      const symbolsPage = paginate(
+        result.symbols,
+        numberArg(args, "symbol_offset", 0),
+        numberArg(args, "symbol_limit", 100)
+      );
       return jsonResult(
-        explainDependency(snapshot, from, to, {
-          includeTests: boolArg(args, "include_tests", false),
-        })
+        {
+          from,
+          to,
+          file_imports: page.items,
+          total_file_imports: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          next_offset: page.next_offset,
+          symbol_edges: symbolPage.items.map(compactEdge),
+          total_symbol_edges: symbolPage.total,
+          symbol_offset: symbolPage.offset,
+          symbol_limit: symbolPage.limit,
+          next_symbol_offset: symbolPage.next_offset,
+          symbol_edges_truncated: symbolPage.truncated,
+          symbols: symbolsPage.items,
+          total_symbols: symbolsPage.total,
+          symbols_truncated: symbolsPage.truncated,
+        },
+        numberArg(args, "max_chars", 20_000)
       );
     }
   );
@@ -412,17 +751,39 @@ export function registerMcpTools(
     {
       query: z.string(),
       limit: z.number().int().min(1).max(50).default(10),
+      offset: offsetOptional,
+      compact: compactTrue,
+      include_source: z.boolean().default(false),
+      source_chars: z.number().int().min(0).max(20_000).default(1200),
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const query = stringArg(args, "query");
       if (!query) return errorResult({ error: "query_required" });
-      const matches = getSymbolMatches(snapshot, query, numberArg(args, "limit", 10));
+      const allMatches = getSymbolMatches(snapshot, query, Math.max(1, snapshot.symbols.size));
+      const page = paginate(allMatches, numberArg(args, "offset", 0), numberArg(args, "limit", 10));
+      const compact = boolArg(args, "compact", true);
+      const includeSource = boolArg(args, "include_source", false);
+      const sourceChars = numberArg(args, "source_chars", 1200);
+      const symbols = page.items.map((symbol) => {
+        const resolved = store.resolveSummary(symbol);
+        const projected = compact
+          ? { ...compactSymbol(symbol, resolved.state), summary: resolved.summary }
+          : leanSymbol(snapshot, store, symbol);
+        return includeSource
+          ? { ...projected, source_preview: truncateText(symbol.sourcePreview, sourceChars).text }
+          : projected;
+      });
       return jsonResult(
-        matches.map((symbol) => ({
-          ...leanSymbol(snapshot, store, symbol),
-          source_preview: symbol.sourcePreview.slice(0, 1200),
-        }))
+        {
+          total: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          next_offset: page.next_offset,
+          symbols,
+        },
+        numberArg(args, "max_chars", 20_000)
       );
     }
   );
@@ -435,19 +796,30 @@ export function registerMcpTools(
       kind: z.string().optional(),
       limit: z.number().int().min(0).max(1000).default(100),
       offset: z.number().int().min(0).default(0),
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
+      const limit = numberArg(args, "limit", 100);
+      const offset = numberArg(args, "offset", 0);
       const result = getApiSurface(snapshot, {
         module: stringArg(args, "module"),
         kind: stringArg(args, "kind"),
-        limit: numberArg(args, "limit", 100),
-        offset: numberArg(args, "offset", 0),
+        limit: limit > 0 ? limit : 0,
+        offset,
       });
-      return jsonResult({
-        total: result.total,
-        symbols: result.symbols.map((symbol) => leanSymbol(snapshot, store, symbol)),
-      });
+      const compact = boolArg(args, "compact", true);
+      return jsonResult(
+        {
+          total: result.total,
+          offset,
+          limit,
+          next_offset: offset + result.symbols.length < result.total ? offset + result.symbols.length : null,
+          symbols: result.symbols.map((symbol) => symbolResult(snapshot, store, symbol, compact)),
+        },
+        numberArg(args, "max_chars", 30_000)
+      );
     }
   );
 
@@ -459,18 +831,30 @@ export function registerMcpTools(
       symbolId: z.string().optional(),
       include_imports: z.boolean().default(false),
       limit: z.number().int().min(1).max(2000).default(500),
+      offset: offsetOptional,
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const resolved = resolveSymbol(snapshot, stringArg(args, "symbol_id", "symbolId"));
       if ("error" in resolved) return resolved.error;
-      return jsonResult({
-        symbol: leanSymbol(snapshot, store, resolved.symbol),
-        references: getReferences(snapshot, resolved.symbol.id, {
-          includeImports: boolArg(args, "include_imports", false),
-          limit: numberArg(args, "limit", 500),
-        }),
+      const allReferences = getReferences(snapshot, resolved.symbol.id, {
+        includeImports: boolArg(args, "include_imports", false),
+        limit: Math.max(1, snapshot.edges.length + 1),
       });
+      const page = paginate(allReferences, numberArg(args, "offset", 0), numberArg(args, "limit", 500));
+      return jsonResult(
+        {
+          symbol: symbolResult(snapshot, store, resolved.symbol, boolArg(args, "compact", true)),
+          total: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          next_offset: page.next_offset,
+          references: page.items,
+        },
+        numberArg(args, "max_chars", 30_000)
+      );
     }
   );
 
@@ -482,16 +866,49 @@ export function registerMcpTools(
       symbolId: z.string().optional(),
       depth: z.number().int().min(1).max(6).default(2),
       direction: z.enum(["callers", "callees", "both"]).default("both"),
+      max_nodes: z.number().int().min(1).max(2000).default(200),
+      max_edges: z.number().int().min(1).max(10_000).default(1000),
+      node_offset: offsetOptional,
+      edge_offset: offsetOptional,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const resolved = resolveSymbol(snapshot, stringArg(args, "symbol_id", "symbolId"));
       if ("error" in resolved) return resolved.error;
+      const graph = getCallGraph(snapshot, resolved.symbol.id, {
+        depth: numberArg(args, "depth", 2),
+        direction: (stringArg(args, "direction") as "callers" | "callees" | "both" | undefined) ?? "both",
+      });
+      const nodePage = paginate(
+        graph.nodes,
+        numberArg(args, "node_offset", 0),
+        numberArg(args, "max_nodes", 200)
+      );
+      const allowed = new Set(nodePage.items.map((node) => node.id));
+      const pageEdges = graph.edges.filter((edge) => allowed.has(edge.from) && allowed.has(edge.to));
+      const edgePage = paginate(
+        pageEdges,
+        numberArg(args, "edge_offset", 0),
+        numberArg(args, "max_edges", 1000)
+      );
       return jsonResult(
-        getCallGraph(snapshot, resolved.symbol.id, {
-          depth: numberArg(args, "depth", 2),
-          direction: (stringArg(args, "direction") as "callers" | "callees" | "both" | undefined) ?? "both",
-        })
+        {
+          root: graph.root,
+          nodes: nodePage.items.map((node) => ({ ...node })),
+          edges: edgePage.items,
+          total_nodes: nodePage.total,
+          node_offset: nodePage.offset,
+          node_limit: nodePage.limit,
+          next_node_offset: nodePage.next_offset,
+          total_edges: graph.edges.length,
+          page_total_edges: pageEdges.length,
+          edge_offset: edgePage.offset,
+          edge_limit: edgePage.limit,
+          next_edge_offset: edgePage.next_offset,
+          truncated: nodePage.truncated || edgePage.truncated || graph.truncated || pageEdges.length !== graph.edges.length,
+        },
+        numberArg(args, "max_chars", 30_000)
       );
     }
   );
@@ -504,16 +921,95 @@ export function registerMcpTools(
       symbolId: z.string().optional(),
       depth: z.number().int().min(1).max(6).default(2),
       direction: z.enum(["children", "parents", "both"]).default("both"),
+      max_nodes: z.number().int().min(1).max(2000).default(200),
+      max_edges: z.number().int().min(1).max(10_000).default(1000),
+      node_offset: offsetOptional,
+      edge_offset: offsetOptional,
+      context_limit: z.number().int().min(1).max(1000).default(100),
+      context_offset: offsetOptional,
+      hook_limit: z.number().int().min(1).max(1000).default(100),
+      hook_offset: offsetOptional,
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const resolved = resolveSymbol(snapshot, stringArg(args, "symbol_id", "symbolId"));
       if ("error" in resolved) return resolved.error;
+      const graph = getComponentTree(snapshot, resolved.symbol.id, {
+        depth: numberArg(args, "depth", 2),
+        direction: (stringArg(args, "direction") as "children" | "parents" | "both" | undefined) ?? "both",
+      });
+      const nodePage = paginate(
+        graph.nodes,
+        numberArg(args, "node_offset", 0),
+        numberArg(args, "max_nodes", 200)
+      );
+      const allowed = new Set(nodePage.items.map((node) => node.id));
+      const pageEdges = graph.edges.filter((edge) => allowed.has(edge.from) && allowed.has(edge.to));
+      const edgePage = paginate(
+        pageEdges,
+        numberArg(args, "edge_offset", 0),
+        numberArg(args, "max_edges", 1000)
+      );
+      const compact = boolArg(args, "compact", true);
+      const projectNode = (node: (typeof graph.nodes)[number]): Record<string, unknown> =>
+        compact
+          ? {
+              id: node.id,
+              name: node.name,
+              kind: node.kind,
+              module: node.module,
+              file: node.file,
+              line: node.line,
+            }
+          : { ...node };
+      const contexts = graph.contexts;
+      const hooks = graph.hooks;
+      const contextPage = paginate(
+        contexts,
+        numberArg(args, "context_offset", 0),
+        numberArg(args, "context_limit", 100)
+      );
+      const hookPage = paginate(
+        hooks,
+        numberArg(args, "hook_offset", 0),
+        numberArg(args, "hook_limit", 100)
+      );
       return jsonResult(
-        getComponentTree(snapshot, resolved.symbol.id, {
-          depth: numberArg(args, "depth", 2),
-          direction: (stringArg(args, "direction") as "children" | "parents" | "both" | undefined) ?? "both",
-        })
+        {
+          root: graph.root,
+          nodes: nodePage.items.map(projectNode),
+          edges: edgePage.items,
+          contexts: contextPage.items.map(projectNode),
+          hooks: hookPage.items.map(projectNode),
+          total_nodes: nodePage.total,
+          node_offset: nodePage.offset,
+          node_limit: nodePage.limit,
+          next_node_offset: nodePage.next_offset,
+          total_edges: graph.edges.length,
+          page_total_edges: pageEdges.length,
+          edge_offset: edgePage.offset,
+          edge_limit: edgePage.limit,
+          next_edge_offset: edgePage.next_offset,
+          total_contexts: contextPage.total,
+          context_offset: contextPage.offset,
+          context_limit: contextPage.limit,
+          next_context_offset: contextPage.next_offset,
+          total_hooks: hookPage.total,
+          hook_offset: hookPage.offset,
+          hook_limit: hookPage.limit,
+          next_hook_offset: hookPage.next_offset,
+          contexts_truncated: contextPage.truncated,
+          hooks_truncated: hookPage.truncated,
+          truncated:
+            nodePage.truncated ||
+            edgePage.truncated ||
+            contextPage.truncated ||
+            hookPage.truncated ||
+            pageEdges.length !== graph.edges.length,
+        },
+        numberArg(args, "max_chars", 30_000)
       );
     }
   );
@@ -524,16 +1020,62 @@ export function registerMcpTools(
     {
       symbol_id: z.string().optional(),
       symbolId: z.string().optional(),
+      limit: z.number().int().min(1).max(1000).default(100),
+      offset: offsetOptional,
+      implementation_limit: z.number().int().min(1).max(1000).default(50),
+      implementation_offset: offsetOptional,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const query = stringArg(args, "symbol_id", "symbolId");
+      let interfaces: ReturnType<typeof findImplementations>;
       if (query) {
         const resolved = resolveSymbol(snapshot, query);
         if ("error" in resolved) return resolved.error;
-        return jsonResult(findImplementations(snapshot, resolved.symbol.id));
+        interfaces = findImplementations(snapshot, resolved.symbol.id);
+      } else {
+        interfaces = findImplementations(snapshot);
       }
-      return jsonResult(findImplementations(snapshot));
+      const page = paginate(interfaces, numberArg(args, "offset", 0), numberArg(args, "limit", 100));
+      const implementationLimit = numberArg(args, "implementation_limit", 50);
+      const implementationOffset = numberArg(args, "implementation_offset", 0);
+      const items = page.items.map((entry) => {
+        const implementationPage = paginate(entry.implementations, implementationOffset, implementationLimit);
+        return {
+          id: entry.interface.id,
+          name: entry.interface.name,
+          kind: entry.interface.kind,
+          module: entry.interface.module,
+          file: entry.interface.file,
+          line: entry.interface.line,
+          members: entry.interface.members,
+          total_implementations: implementationPage.total,
+          implementations: implementationPage.items.map((implementation) => ({
+            id: implementation.id,
+            name: implementation.name,
+            kind: implementation.kind,
+            module: implementation.module,
+            file: implementation.file,
+            line: implementation.line,
+            via: implementation.via,
+          })),
+          implementation_offset: implementationPage.offset,
+          implementation_limit: implementationPage.limit,
+          next_implementation_offset: implementationPage.next_offset,
+          implementations_truncated: implementationPage.truncated,
+        };
+      });
+      return jsonResult(
+        {
+          total: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          next_offset: page.next_offset,
+          interfaces: items,
+        },
+        numberArg(args, "max_chars", 30_000)
+      );
     }
   );
 
@@ -545,13 +1087,76 @@ export function registerMcpTools(
       symbolId: z.string().optional(),
       max_depth: z.number().int().min(1).max(8).default(4),
       maxDepth: z.number().int().min(1).max(8).optional(),
+      direct_limit: z.number().int().min(1).max(500).default(25),
+      direct_offset: offsetOptional,
+      impact_limit: z.number().int().min(1).max(1000).default(100),
+      impact_offset: offsetOptional,
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const resolved = resolveSymbol(snapshot, stringArg(args, "symbol_id", "symbolId"));
       if ("error" in resolved) return resolved.error;
+      const impact = getImpactAnalysis(
+        snapshot,
+        resolved.symbol.id,
+        numberArg(args, "max_depth", numberArg(args, "maxDepth", 4))
+      );
+      const directPage = paginate(
+        impact.directReferences,
+        numberArg(args, "direct_offset", 0),
+        numberArg(args, "direct_limit", 25)
+      );
+      const impactLimit = numberArg(args, "impact_limit", 100);
+      const impactOffset = numberArg(args, "impact_offset", 0);
+      const compact = boolArg(args, "compact", true);
+      const componentPage = paginate(impact.impactedComponents, impactOffset, impactLimit);
+      const hookPage = paginate(impact.impactedHooks, impactOffset, impactLimit);
+      const callerPage = paginate(impact.impactedCallers, impactOffset, impactLimit);
+      const filePage = paginate(impact.impactedFiles, impactOffset, impactLimit);
+      const testPage = paginate(impact.impactedTestFiles, impactOffset, impactLimit);
+      const modulePage = paginate(impact.impactedModules, impactOffset, impactLimit);
       return jsonResult(
-        getImpactAnalysis(snapshot, resolved.symbol.id, numberArg(args, "max_depth", numberArg(args, "maxDepth", 4)))
+        {
+          target: symbolResult(snapshot, store, resolved.symbol, compact),
+          risk: impact.risk,
+          direct_references_count: impact.directReferencesCount,
+          direct_references: directPage.items.map(compactEdge),
+          direct_offset: directPage.offset,
+          direct_limit: directPage.limit,
+          next_direct_offset: directPage.next_offset,
+          impacted_components: componentPage.items.map(impactSymbolResult),
+          impacted_hooks: hookPage.items.map(impactSymbolResult),
+          impacted_callers: callerPage.items.map(impactSymbolResult),
+          total_impacted_components: componentPage.total,
+          total_impacted_hooks: hookPage.total,
+          total_impacted_callers: callerPage.total,
+          impacted_files: filePage.items,
+          impacted_modules: modulePage.items,
+          impacted_test_files: testPage.items,
+          total_impacted_files: filePage.total,
+          total_impacted_modules: modulePage.total,
+          total_impacted_test_files: testPage.total,
+          impact_offset: impactOffset,
+          impact_limit: impactLimit,
+          next_impact_offset: [componentPage, hookPage, callerPage, filePage, testPage, modulePage].some(
+            (page) => page.next_offset !== null
+          )
+            ? impactOffset + impactLimit
+            : null,
+          transitive_count: impact.transitiveCount,
+          impact_truncated:
+            directPage.truncated ||
+            componentPage.truncated ||
+            hookPage.truncated ||
+            callerPage.truncated ||
+            filePage.truncated ||
+            testPage.truncated ||
+            modulePage.truncated,
+          suggested_commands: impact.suggestedCommands,
+        },
+        numberArg(args, "max_chars", 20_000)
       );
     }
   );
@@ -565,6 +1170,8 @@ export function registerMcpTools(
       kind: z.string().optional(),
       group_by: z.enum(["none", "module", "kind"]).default("none"),
       limit: z.number().int().min(1).max(1000).default(200),
+      offset: offsetOptional,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
@@ -573,9 +1180,8 @@ export function registerMcpTools(
       let symbols = getDeadCode(snapshot, boolArg(args, "include_exported", false));
       if (moduleFilter) symbols = symbols.filter((symbol) => symbol.module === moduleFilter);
       if (kindFilter) symbols = symbols.filter((symbol) => symbol.kind === kindFilter);
-      const total = symbols.length;
-      symbols = symbols.slice(0, numberArg(args, "limit", 200));
-      const lean = symbols.map((symbol) => ({
+      const page = paginate(symbols, numberArg(args, "offset", 0), numberArg(args, "limit", 200));
+      const lean = page.items.map((symbol) => ({
         id: symbol.id,
         name: symbol.name,
         kind: symbol.kind,
@@ -586,14 +1192,23 @@ export function registerMcpTools(
         complexity: symbol.complexity,
         exported: symbol.exported,
       }));
+      const pagination = {
+        total: page.total,
+        offset: page.offset,
+        limit: page.limit,
+        next_offset: page.next_offset,
+        truncated: page.truncated,
+      };
       const groupBy = stringArg(args, "group_by") ?? "none";
-      if (groupBy === "none") return jsonResult({ total, symbols: lean });
+      if (groupBy === "none") {
+        return jsonResult({ ...pagination, symbols: lean }, numberArg(args, "max_chars", 20_000));
+      }
       const groups: Record<string, unknown[]> = {};
       for (const symbol of lean) {
         const key = groupBy === "module" ? symbol.module : symbol.kind;
         (groups[key] ??= []).push(symbol);
       }
-      return jsonResult({ total, groups });
+      return jsonResult({ ...pagination, groups }, numberArg(args, "max_chars", 20_000));
     }
   );
 
@@ -606,13 +1221,15 @@ export function registerMcpTools(
       untested_only: z.boolean().default(false),
       min_complexity: z.number().int().min(1).default(1),
       sort_by: z.enum(["risk", "complexity", "loc", "fan_in"]).default("risk"),
+      offset: offsetOptional,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const moduleFilter = stringArg(args, "module");
       const untestedOnly = boolArg(args, "untested_only", false);
       const minComplexity = numberArg(args, "min_complexity", 1);
-      let hotspots = getHotspots(snapshot, 5000).filter(
+      let hotspots = getHotspots(snapshot, Math.max(1, snapshot.symbols.size)).filter(
         (hotspot) =>
           (!moduleFilter || hotspot.module === moduleFilter) &&
           (!untestedOnly || !hotspot.testReachable) &&
@@ -631,8 +1248,18 @@ export function registerMcpTools(
             return b.riskScore - a.riskScore;
         }
       });
-      const total = hotspots.length;
-      return jsonResult({ total, hotspots: hotspots.slice(0, numberArg(args, "limit", 25)) });
+      const page = paginate(hotspots, numberArg(args, "offset", 0), numberArg(args, "limit", 25));
+      return jsonResult(
+        {
+          total: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          next_offset: page.next_offset,
+          truncated: page.truncated,
+          hotspots: page.items.map(hotspotResult),
+        },
+        numberArg(args, "max_chars", 20_000)
+      );
     }
   );
 
@@ -642,6 +1269,9 @@ export function registerMcpTools(
     {
       symbol_id: z.string().optional(),
       symbolId: z.string().optional(),
+      source_chars: z.number().int().min(0).max(100_000).default(20_000),
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
@@ -649,12 +1279,18 @@ export function registerMcpTools(
       if ("error" in resolved) return resolved.error;
       const body = getFunctionBody(snapshot, resolved.symbol.id);
       if (!body) return errorResult({ error: "symbol_not_found" });
-      return jsonResult({
-        symbol: leanSymbol(snapshot, store, resolved.symbol),
-        source: body.source,
-        loc: body.loc,
-        complexity: body.complexity,
-      });
+      const source = truncateText(body.source, numberArg(args, "source_chars", 20_000));
+      return jsonResult(
+        {
+          symbol: symbolResult(snapshot, store, resolved.symbol, boolArg(args, "compact", true)),
+          source: source.text,
+          source_truncated: source.truncated,
+          source_original_chars: source.originalChars,
+          loc: body.loc,
+          complexity: body.complexity,
+        },
+        numberArg(args, "max_chars", 30_000)
+      );
     }
   );
 
@@ -663,22 +1299,33 @@ export function registerMcpTools(
     "Eligible symbols missing or stale in the shared summary cache, ordered bottom-up.",
     {
       limit: z.number().int().min(1).max(500).default(25),
+      offset: offsetOptional,
       module: z.string().optional(),
       kind: z.string().optional(),
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const moduleFilter = stringArg(args, "module");
       const kindFilter = stringArg(args, "kind");
       const stale = store
-        .listStale(snapshot, Math.max(numberArg(args, "limit", 25) * 4, 100))
-        .filter((item) => (!moduleFilter || item.module === moduleFilter) && (!kindFilter || item.kind === kindFilter))
-        .slice(0, numberArg(args, "limit", 25))
-        .map((item) => ({
-          ...item,
-          fan_in: getFanCounts(snapshot, item.id).fanIn,
-        }));
-      return jsonResult(stale);
+        .listStale(snapshot, Math.max(1, snapshot.symbols.size))
+        .filter((item) => (!moduleFilter || item.module === moduleFilter) && (!kindFilter || item.kind === kindFilter));
+      const page = paginate(stale, numberArg(args, "offset", 0), numberArg(args, "limit", 25));
+      return jsonResult(
+        {
+          total: page.total,
+          offset: page.offset,
+          limit: page.limit,
+          next_offset: page.next_offset,
+          truncated: page.truncated,
+          symbols: page.items.map((item) => ({
+            ...item,
+            fan_in: getFanCounts(snapshot, item.id).fanIn,
+          })),
+        },
+        numberArg(args, "max_chars", 20_000)
+      );
     }
   );
 
@@ -690,6 +1337,11 @@ export function registerMcpTools(
       symbolIds: z.array(z.string()).min(1).max(25).optional(),
       symbol_id: z.string().optional(),
       include_source: z.boolean().default(true),
+      source_chars: z.number().int().min(0).max(50_000).default(12_000),
+      dependency_limit: z.number().int().min(1).max(200).default(25),
+      dependency_offset: offsetOptional,
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
@@ -699,15 +1351,23 @@ export function registerMcpTools(
         ...parseIdList(stringArg(args, "symbol_id") ?? ""),
       ];
       if (ids.length === 0) return errorResult({ error: "symbol_ids_required" });
+      const uniqueIds = [...new Set(ids)];
       const includeSource = boolArg(args, "include_source", true);
-      const items = ids.slice(0, 25).map((id) => {
+      const compact = boolArg(args, "compact", true);
+      const items = uniqueIds.slice(0, 25).map((id) => {
         const resolved = resolveSymbol(snapshot, id);
         if ("error" in resolved) return { id, error: "not_found" };
         const symbol = resolved.symbol;
         const resolvedSummary = store.resolveSummary(symbol);
         const body = includeSource ? getFunctionBody(snapshot, symbol.id) : null;
+        const source = body ? truncateText(body.source, numberArg(args, "source_chars", 12_000)) : null;
         return {
-          symbol: leanSymbol(snapshot, store, symbol),
+          symbol: symbolResult(snapshot, store, symbol, compact),
+          hashes: {
+            self: symbol.selfHash,
+            dep: symbol.depHash,
+            content: symbol.contentHash,
+          },
           prompt_version: store.promptVersion,
           schema: isCallableKind(symbol.kind) ? SUMMARY_SCHEMA.callable : SUMMARY_SCHEMA.type,
           sync_state: resolvedSummary.state,
@@ -716,11 +1376,25 @@ export function registerMcpTools(
           previous_summary:
             resolvedSummary.previousSummary ??
             (resolvedSummary.state === "soft_stale" ? resolvedSummary.summary : null),
-          source: body?.source,
-          dependencies: symbolDependencyContext(snapshot, store, symbol.id),
+          source: source?.text,
+          source_truncated: source?.truncated ?? false,
+          source_original_chars: source?.originalChars ?? 0,
+          dependencies: symbolDependencyContext(snapshot, store, symbol.id, {
+            limit: numberArg(args, "dependency_limit", 25),
+            offset: numberArg(args, "dependency_offset", 0),
+            compact,
+          }),
         };
       });
-      return jsonResult(items);
+      return jsonResult(
+        {
+          total: uniqueIds.length,
+          returned: items.length,
+          truncated: uniqueIds.length > items.length,
+          items,
+        },
+        numberArg(args, "max_chars", 60_000)
+      );
     }
   );
 
@@ -743,6 +1417,7 @@ export function registerMcpTools(
         )
         .min(1)
         .max(50),
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
@@ -760,7 +1435,7 @@ export function registerMcpTools(
         expectedDepHash: typeof entry.expected_dep_hash === "string" ? entry.expected_dep_hash : undefined,
         modelId: typeof entry.model_id === "string" ? entry.model_id : undefined,
       }));
-      return jsonResult(store.upsertSummaries(entries, snapshot));
+      return jsonResult(store.upsertSummaries(entries, snapshot), numberArg(args, "max_chars", 20_000));
     }
   );
 
@@ -769,78 +1444,120 @@ export function registerMcpTools(
     "Summary cache coverage by kind and module.",
     {
       module: z.string().optional(),
+      compact: compactTrue,
+      max_chars: maxCharsOptional,
     },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const moduleFilter = stringArg(args, "module");
-      if (!moduleFilter) return jsonResult(store.getCoverage(snapshot));
-      const filteredSnapshot: IndexSnapshot = {
-        ...snapshot,
-        symbols: new Map(
-          [...snapshot.symbols].filter(([, symbol]) => symbol.module === moduleFilter)
-        ),
-      };
-      return jsonResult(store.getCoverage(filteredSnapshot));
+      const coverageSnapshot: IndexSnapshot = moduleFilter
+        ? {
+            ...snapshot,
+            symbols: new Map(
+              [...snapshot.symbols].filter(([, symbol]) => symbol.module === moduleFilter)
+            ),
+          }
+        : snapshot;
+      const coverage = store.getCoverage(coverageSnapshot);
+      return jsonResult(
+        boolArg(args, "compact", true) ? compactCoverage(coverage) : coverage,
+        numberArg(args, "max_chars", 20_000)
+      );
     }
   );
 
-  register("run_tests", "Run the project's configured test runner.", { timeout_seconds: z.number().int().min(10).max(1800).default(900) }, async (args) => {
-    const snapshot = await controller.getSnapshot();
-    const runner = detectTestRunner(snapshot.root, controller.indexer.config);
-    if (!runner.available || !runner.command) {
-      return errorResult({ error: "test_runner_not_found", hint: runner.hint, source: runner.source });
+  register(
+    "run_tests",
+    "Run the project's configured test runner with bounded stdout/stderr.",
+    {
+      timeout_seconds: z.number().int().min(10).max(1800).default(900),
+      output_chars: outputChars,
+      max_chars: maxCharsOptional,
+    },
+    async (args) => {
+      const snapshot = await controller.getSnapshot();
+      const runner = detectTestRunner(snapshot.root, controller.indexer.config);
+      if (!runner.available || !runner.command) {
+        return errorResult({ error: "test_runner_not_found", hint: runner.hint, source: runner.source });
+      }
+      const result = await runCommand(snapshot.root, runner.command, numberArg(args, "timeout_seconds", 900) * 1000);
+      return {
+        ...commandResult(runner.source, result, numberArg(args, "output_chars", 12_000), numberArg(args, "max_chars", 30_000)),
+        ...(result.exit_code === 0 && !result.timed_out ? {} : { isError: true }),
+      };
     }
-    const result = await runCommand(snapshot.root, runner.command, numberArg(args, "timeout_seconds", 900) * 1000);
-    return {
-      ...jsonResult({ runner: runner.source, ...result }),
-      ...(result.exit_code === 0 && !result.timed_out ? {} : { isError: true }),
-    };
-  });
+  );
 
-  register("run_typecheck", "Run the project's type checker (tsc --noEmit by default).", { timeout_seconds: z.number().int().min(10).max(1800).default(900) }, async (args) => {
-    const snapshot = await controller.getSnapshot();
-    const runner = detectTypecheckRunner(snapshot.root, controller.indexer.config);
-    if (!runner.available || !runner.command) {
-      return errorResult({ error: "typecheck_runner_not_found", hint: runner.hint, source: runner.source });
+  register(
+    "run_typecheck",
+    "Run the project's type checker (tsc --noEmit by default) with bounded stdout/stderr.",
+    {
+      timeout_seconds: z.number().int().min(10).max(1800).default(900),
+      output_chars: outputChars,
+      max_chars: maxCharsOptional,
+    },
+    async (args) => {
+      const snapshot = await controller.getSnapshot();
+      const runner = detectTypecheckRunner(snapshot.root, controller.indexer.config);
+      if (!runner.available || !runner.command) {
+        return errorResult({ error: "typecheck_runner_not_found", hint: runner.hint, source: runner.source });
+      }
+      const result = await runCommand(snapshot.root, runner.command, numberArg(args, "timeout_seconds", 900) * 1000);
+      return {
+        ...commandResult(runner.source, result, numberArg(args, "output_chars", 12_000), numberArg(args, "max_chars", 30_000)),
+        ...(result.exit_code === 0 && !result.timed_out ? {} : { isError: true }),
+      };
     }
-    const result = await runCommand(snapshot.root, runner.command, numberArg(args, "timeout_seconds", 900) * 1000);
-    return {
-      ...jsonResult({ runner: runner.source, ...result }),
-      ...(result.exit_code === 0 && !result.timed_out ? {} : { isError: true }),
-    };
-  });
+  );
 
-  register("run_lint", "Run the project's configured linter (eslint, biome, or package script).", { timeout_seconds: z.number().int().min(10).max(1800).default(600) }, async (args) => {
-    const snapshot = await controller.getSnapshot();
-    const runner = detectLintRunner(snapshot.root, controller.indexer.config);
-    if (!runner.available || !runner.command) {
-      return errorResult({ error: "lint_runner_not_found", hint: runner.hint, source: runner.source });
+  register(
+    "run_lint",
+    "Run the project's configured linter with bounded stdout/stderr.",
+    {
+      timeout_seconds: z.number().int().min(10).max(1800).default(600),
+      output_chars: outputChars,
+      max_chars: maxCharsOptional,
+    },
+    async (args) => {
+      const snapshot = await controller.getSnapshot();
+      const runner = detectLintRunner(snapshot.root, controller.indexer.config);
+      if (!runner.available || !runner.command) {
+        return errorResult({ error: "lint_runner_not_found", hint: runner.hint, source: runner.source });
+      }
+      const result = await runCommand(snapshot.root, runner.command, numberArg(args, "timeout_seconds", 600) * 1000);
+      return {
+        ...commandResult(runner.source, result, numberArg(args, "output_chars", 12_000), numberArg(args, "max_chars", 30_000)),
+        ...(result.exit_code === 0 && !result.timed_out ? {} : { isError: true }),
+      };
     }
-    const result = await runCommand(snapshot.root, runner.command, numberArg(args, "timeout_seconds", 600) * 1000);
-    return {
-      ...jsonResult({ runner: runner.source, ...result }),
-      ...(result.exit_code === 0 && !result.timed_out ? {} : { isError: true }),
-    };
-  });
+  );
 
-  register("reindex", "Force a full index rebuild and working database sync.", { full_diagnostics: z.boolean().default(true) }, async (args) => {
-    const snapshot = await controller.rebuild({
-      fullDiagnostics: boolArg(args, "full_diagnostics", true),
-    });
-    return jsonResult({
-      project_id: snapshot.projectId,
-      indexed_at: snapshot.indexedAt,
-      duration_ms: snapshot.durationMs,
-      symbols: snapshot.symbols.size,
-      edges: snapshot.edges.length,
-      files: snapshot.filesCount,
-      modules: snapshot.modules.length,
-      prod_errors: snapshot.prodErrors.length,
-      warnings: snapshot.warnings.length,
-      index_state: controller.status(),
-      storage: store.getInfo(),
-    });
-  });
+  register(
+    "reindex",
+    "Force a full index rebuild and working database sync.",
+    { full_diagnostics: z.boolean().default(true), max_chars: maxCharsOptional },
+    async (args) => {
+      const snapshot = await controller.rebuild({
+        fullDiagnostics: boolArg(args, "full_diagnostics", true),
+      });
+      return jsonResult(
+        {
+          project_id: snapshot.projectId,
+          indexed_at: snapshot.indexedAt,
+          duration_ms: snapshot.durationMs,
+          symbols: snapshot.symbols.size,
+          edges: snapshot.edges.length,
+          files: snapshot.filesCount,
+          modules: snapshot.modules.length,
+          prod_errors: snapshot.prodErrors.length,
+          warnings: snapshot.warnings.length,
+          index_state: controller.status(),
+          storage: store.getInfo(),
+        },
+        numberArg(args, "max_chars", 20_000)
+      );
+    }
+  );
 
   return tools;
 }

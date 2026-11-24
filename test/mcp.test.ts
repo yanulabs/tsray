@@ -50,6 +50,13 @@ describe("MCP tool surface", () => {
       expect(names).toContain("get_summary_coverage");
       expect(names).toContain("run_tests");
       expect(tools.length).toBeGreaterThanOrEqual(20);
+      for (const tool of listed.tools) {
+        expect(tool.inputSchema.properties).toHaveProperty("max_chars");
+      }
+      for (const name of ["run_tests", "run_typecheck", "run_lint"]) {
+        const tool = listed.tools.find((entry) => entry.name === name);
+        expect(tool?.inputSchema.properties).toHaveProperty("output_chars");
+      }
 
       const info = await client.callTool({ name: "project_info", arguments: {} });
       expect(info.isError).toBeFalsy();
@@ -70,9 +77,11 @@ describe("MCP tool surface", () => {
         name: "lookup_symbol",
         arguments: { query: "Button" },
       });
-      const lookupJson = JSON.parse(textOf(lookup)) as Array<{ name: string; sync_state: string }>;
-      expect(lookupJson.some((symbol) => symbol.name === "Button")).toBe(true);
-      expect(lookupJson.every((symbol) => typeof symbol.sync_state === "string")).toBe(true);
+      const lookupJson = JSON.parse(textOf(lookup)) as {
+        symbols: Array<{ name: string; sync_state: string }>;
+      };
+      expect(lookupJson.symbols.some((symbol) => symbol.name === "Button")).toBe(true);
+      expect(lookupJson.symbols.every((symbol) => typeof symbol.sync_state === "string")).toBe(true);
     } finally {
       await server.close();
       await client.close();
@@ -99,6 +108,159 @@ describe("MCP tool surface", () => {
     }
   }, 60_000);
 
+  it("uses compact defaults, pagination, source opt-in, and hard response budgets", async () => {
+    const { client, server, controller, store } = await connect();
+    try {
+      const info = await client.callTool({ name: "project_info", arguments: {} });
+      const infoJson = JSON.parse(textOf(info)) as { tool_count: number; tools?: string[] };
+      expect(infoJson.tool_count).toBeGreaterThanOrEqual(20);
+      expect(infoJson.tools).toBeUndefined();
+
+      const first = await client.callTool({
+        name: "lookup_symbol",
+        arguments: { query: "Button", limit: 1 },
+      });
+      const firstJson = JSON.parse(textOf(first)) as {
+        total: number;
+        next_offset: number | null;
+        symbols: Array<Record<string, unknown>>;
+      };
+      expect(firstJson.total).toBeGreaterThan(1);
+      expect(firstJson.next_offset).toBe(1);
+      expect(firstJson.symbols[0]).not.toHaveProperty("source_preview");
+      expect(firstJson.symbols[0]).not.toHaveProperty("doc");
+      expect(firstJson.symbols[0]).toHaveProperty("content_hash");
+
+      const second = await client.callTool({
+        name: "lookup_symbol",
+        arguments: { query: "Button", limit: 1, offset: 1 },
+      });
+      const secondJson = JSON.parse(textOf(second)) as { symbols: Array<{ id: string }> };
+      expect(secondJson.symbols[0]!.id).not.toBe(firstJson.symbols[0]!.id);
+
+      const withSource = await client.callTool({
+        name: "lookup_symbol",
+        arguments: { query: "Button", limit: 1, include_source: true, source_chars: 20 },
+      });
+      const sourceJson = JSON.parse(textOf(withSource)) as {
+        symbols: Array<{ source_preview: string }>;
+      };
+      expect(sourceJson.symbols[0]!.source_preview.length).toBeLessThanOrEqual(20);
+
+      const graph = await client.callTool({
+        name: "get_dependency_graph",
+        arguments: { scope: "module", max_nodes: 1 },
+      });
+      const graphJson = JSON.parse(textOf(graph)) as {
+        nodes: unknown[];
+        total_nodes: number;
+        next_node_offset: number | null;
+      };
+      expect(graphJson.nodes).toHaveLength(1);
+      expect(graphJson.total_nodes).toBeGreaterThan(1);
+      expect(graphJson.next_node_offset).toBe(1);
+
+      const budgeted = await client.callTool({
+        name: "get_codebase_map",
+        arguments: { format: "json", max_chars: 1000 },
+      });
+      expect(textOf(budgeted).length).toBeLessThanOrEqual(1000);
+      const budgetJson = JSON.parse(textOf(budgeted)) as {
+        _response: { truncated: boolean; max_chars: number };
+      };
+      expect(budgetJson._response).toMatchObject({ truncated: true, max_chars: 1000 });
+
+      const body = await client.callTool({
+        name: "get_function_body",
+        arguments: { symbol_id: "App", source_chars: 20, max_chars: 1000 },
+      });
+      const bodyJson = JSON.parse(textOf(body)) as {
+        source: string;
+        source_truncated: boolean;
+        source_original_chars: number;
+      };
+      expect(bodyJson.source.length).toBeLessThanOrEqual(20);
+      expect(bodyJson.source_truncated).toBe(true);
+      expect(bodyJson.source_original_chars).toBeGreaterThan(20);
+
+      const impact = await client.callTool({
+        name: "get_impact_analysis",
+        arguments: { symbol_id: "App" },
+      });
+      const impactJson = JSON.parse(textOf(impact)) as {
+        target: Record<string, unknown>;
+        direct_references: Array<Record<string, unknown>>;
+      };
+      expect(impactJson.target).not.toHaveProperty("source_preview");
+      expect(impactJson.target).not.toHaveProperty("source");
+      expect(impactJson.direct_references.every((edge) => "from" in edge && "to" in edge)).toBe(true);
+
+      const stale = await client.callTool({
+        name: "list_stale_summaries",
+        arguments: { limit: 1 },
+      });
+      const staleJson = JSON.parse(textOf(stale)) as {
+        total: number;
+        next_offset: number | null;
+        symbols: unknown[];
+      };
+      expect(staleJson.total).toBeGreaterThan(1);
+      expect(staleJson.symbols).toHaveLength(1);
+      expect(staleJson.next_offset).toBe(1);
+    } finally {
+      await server.close();
+      await client.close();
+      await controller.stop();
+      store.close();
+    }
+  }, 60_000);
+
+  it("bounds summary source and dependency context without dropping hashes", async () => {
+    const { client, server, controller, store } = await connect();
+    try {
+      const result = await client.callTool({
+        name: "get_summary_context",
+        arguments: {
+          symbol_ids: ["sym:src/App.tsx#App"],
+          include_source: true,
+          source_chars: 20,
+          dependency_limit: 1,
+          max_chars: 10_000,
+        },
+      });
+      expect(result.isError).toBeFalsy();
+      expect(textOf(result).length).toBeLessThanOrEqual(10_000);
+      const payload = JSON.parse(textOf(result)) as {
+        returned: number;
+        items: Array<{
+          symbol: { content_hash: string };
+          hashes: { self: string; dep: string; content: string };
+          source: string;
+          source_truncated: boolean;
+          dependencies: {
+            total: number;
+            limit: number;
+            next_offset: number | null;
+            items: Array<Record<string, unknown>>;
+          };
+        }>;
+      };
+      const item = payload.items[0]!;
+      expect(payload.returned).toBe(1);
+      expect(item.source.length).toBeLessThanOrEqual(20);
+      expect(item.source_truncated).toBe(true);
+      expect(item.hashes.content).toBe(item.symbol.content_hash);
+      expect(item.dependencies.items).toHaveLength(1);
+      expect(item.dependencies.limit).toBe(1);
+      expect(item.dependencies.items[0]).not.toHaveProperty("source_preview");
+    } finally {
+      await server.close();
+      await client.close();
+      await controller.stop();
+      store.close();
+    }
+  }, 60_000);
+
   it("stores summaries through the MCP upsert tool", async () => {
     const { client, server, controller, store } = await connect();
     try {
@@ -106,8 +268,10 @@ describe("MCP tool surface", () => {
         name: "lookup_symbol",
         arguments: { query: "sym:src/components/Button.tsx#Button" },
       });
-      const symbols = JSON.parse(textOf(lookup)) as Array<{ content_hash: string; id: string }>;
-      const target = symbols[0]!;
+      const symbols = JSON.parse(textOf(lookup)) as {
+        symbols: Array<{ content_hash: string; id: string }>;
+      };
+      const target = symbols.symbols[0]!;
       const upsert = await client.callTool({
         name: "upsert_summaries",
         arguments: {
@@ -124,13 +288,16 @@ describe("MCP tool surface", () => {
       const saved = JSON.parse(textOf(upsert)) as { saved: number };
       expect(saved.saved).toBe(1);
 
-      const coverage = await client.callTool({ name: "get_summary_coverage", arguments: {} });
+      const coverage = await client.callTool({
+        name: "get_summary_coverage",
+        arguments: { compact: false },
+      });
       const coverageJson = JSON.parse(textOf(coverage)) as { synced: number };
       expect(coverageJson.synced).toBe(1);
 
       const moduleCoverage = await client.callTool({
         name: "get_summary_coverage",
-        arguments: { module: "components" },
+        arguments: { module: "components", compact: false },
       });
       const moduleJson = JSON.parse(textOf(moduleCoverage)) as {
         synced: number;

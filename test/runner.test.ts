@@ -61,4 +61,17 @@ describe("tool runner detection", () => {
     const failure = await runCommand(process.cwd(), 'node -e "process.exit(3)"');
     expect(failure.exit_code).toBe(3);
   });
+
+  it("keeps the head and tail of large command output", async () => {
+    const result = await runCommand(
+      process.cwd(),
+      'node -e "process.stdout.write(\'HEAD\' + \'x\'.repeat(250000) + \'TAIL\')"'
+    );
+    expect(result.exit_code).toBe(0);
+    expect(result.truncated).toBe(true);
+    expect(result.stdout_chars).toBe(250008);
+    expect(result.stdout.startsWith("HEAD")).toBe(true);
+    expect(result.stdout.endsWith("TAIL")).toBe(true);
+    expect(result.stdout.length).toBeLessThan(250008);
+  });
 });
