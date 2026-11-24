@@ -23,13 +23,7 @@ try {
   Atomics.store(signals, signalOffset, 1);
   Atomics.notify(signals, signalOffset);
 
-  const indexer = new TsReactIndexer(data.root, {
-    tsconfig: data.workspace ? undefined : data.tsconfigPath,
-    workspace: data.workspace,
-    allowErrors: true,
-    parallel: false,
-  });
-  indexer.setFileVersions(data.fileVersions);
+  const indexer = TsReactIndexer.fromBootstrap(data.bootstrap);
   indexer.restrictToProjects(data.projects.map((project) => project.path));
 
   const results: SerializedProjectIndex[] = [];

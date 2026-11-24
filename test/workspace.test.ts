@@ -38,6 +38,20 @@ describe("workspace and project references", () => {
     expect(snapshot.files.get("packages/ui/src/index.ts")?.isEntrypoint).toBe(true);
   });
 
+  it("rehydrates worker state without changing the semantic graph", () => {
+    const original = new TsReactIndexer(workspace, { workspace: true, parallel: false });
+    const expected = original.buildIndex({ fullDiagnostics: true });
+    const restored = TsReactIndexer.fromBootstrap(structuredClone(original.getBootstrap()));
+    const actual = restored.buildIndex({ fullDiagnostics: true });
+
+    expect(actual.symbols).toEqual(expected.symbols);
+    expect(actual.edges).toEqual(expected.edges);
+    expect(actual.fileImports).toEqual(expected.fileImports);
+    expect(actual.files).toEqual(expected.files);
+    expect(actual.prodErrors).toEqual(expected.prodErrors);
+    expect(actual.warnings).toEqual(expected.warnings);
+  });
+
   it("handles lazy, forwardRef, classes, and interface contracts", () => {
     const indexer = new TsReactIndexer(workspace, { workspace: true });
     const snapshot = indexer.buildIndex({ fullDiagnostics: true });

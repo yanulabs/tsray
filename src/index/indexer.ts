@@ -51,7 +51,8 @@ export interface IndexerOptions {
   parallel?: boolean;
 }
 
-interface ParsedProject {
+/** @internal */
+export interface ParsedProject {
   path: string;
   options: ts.CompilerOptions;
   fileNames: string[];
@@ -84,11 +85,21 @@ export interface SerializedProjectIndex {
 }
 
 export interface ProjectWorkerTask {
-  root: string;
-  workspace: boolean;
-  tsconfigPath: string;
-  fileVersions: Array<[string, number]>;
+  bootstrap: IndexerBootstrap;
   projects: Array<{ path: string }>;
+}
+
+export interface IndexerBootstrap {
+  root: string;
+  projectId: string;
+  tsconfigPath: string;
+  tsconfigPaths: string[];
+  workspace: boolean;
+  config: ReturnType<typeof resolveProject>["config"];
+  projects: ParsedProject[];
+  packageEntrypoints: string[];
+  fileList: string[];
+  fileVersions: Array<[string, number]>;
 }
 
 export interface ProjectWorkerOutput {
@@ -140,7 +151,25 @@ export class TsReactIndexer {
   private lastSnapshot: IndexSnapshot | null = null;
   private packageEntrypoints: string[] = [];
 
-  constructor(targetPath: string, options: IndexerOptions = {}) {
+  constructor(targetPath: string, options: IndexerOptions = {}, bootstrap?: IndexerBootstrap) {
+    if (bootstrap) {
+      this.root = bootstrap.root;
+      this.projectId = bootstrap.projectId;
+      this.tsconfigPath = bootstrap.tsconfigPath;
+      this.tsconfigPaths = bootstrap.tsconfigPaths;
+      this.workspace = bootstrap.workspace;
+      this.allowErrors = options.allowErrors ?? true;
+      this.parallel = options.parallel ?? false;
+      this.config = bootstrap.config;
+      this.parsedProjects = bootstrap.projects;
+      this.activeProjects = bootstrap.projects.filter((project) => project.ownedFiles.length > 0);
+      this.fileList = [...bootstrap.fileList];
+      this.fileSet = new Set(this.fileList);
+      for (const [file, version] of bootstrap.fileVersions) this.fileVersions.set(file, version);
+      this.packageEntrypoints = [...bootstrap.packageEntrypoints];
+      return;
+    }
+
     const resolved = resolveProject(targetPath, options);
     this.root = resolved.root;
     this.projectId = resolved.projectId;
@@ -154,6 +183,31 @@ export class TsReactIndexer {
     this.loadProjects();
     this.packageEntrypoints = this.collectPackageEntrypoints();
     if (options.fullDiagnostics) this.dirtyFiles.clear();
+  }
+
+  /** @internal Rehydrate a worker without repeating workspace discovery. */
+  static fromBootstrap(bootstrap: IndexerBootstrap): TsReactIndexer {
+    return new TsReactIndexer(
+      bootstrap.root,
+      { allowErrors: true, parallel: false },
+      bootstrap
+    );
+  }
+
+  /** @internal Capture one project/version epoch for worker threads. */
+  getBootstrap(): IndexerBootstrap {
+    return {
+      root: this.root,
+      projectId: this.projectId,
+      tsconfigPath: this.tsconfigPath,
+      tsconfigPaths: this.tsconfigPaths,
+      workspace: this.workspace,
+      config: this.config,
+      projects: this.activeProjects,
+      packageEntrypoints: this.packageEntrypoints,
+      fileList: this.fileList,
+      fileVersions: [...this.fileVersions],
+    };
   }
 
   private loadProjects(): void {
@@ -198,7 +252,8 @@ export class TsReactIndexer {
         fileNames,
         programFiles: fileNames
           .filter((file) => isSourceFile(file) && !this.isIgnoredAbsolute(file))
-          .map(canonicalPath),
+          .map(canonicalPath)
+          .sort(),
         ownedFiles: [],
         references: (result.projectReferences ?? []).map((reference) =>
           path.resolve(path.dirname(configPath), reference.path, "tsconfig.json")
@@ -302,12 +357,6 @@ export class TsReactIndexer {
   restrictToProjects(configPaths: string[]): void {
     const allowed = new Set(configPaths);
     this.activeProjects = this.activeProjects.filter((project) => allowed.has(project.path));
-  }
-
-  /** @internal Keep worker diagnostics keyed to the parent's script versions. */
-  setFileVersions(versions: Array<[string, number]>): void {
-    this.fileVersions.clear();
-    for (const [file, version] of versions) this.fileVersions.set(file, version);
   }
 
   /** @internal Transfer one project's diagnostics back to the parent. */
@@ -621,10 +670,7 @@ export class TsReactIndexer {
     const outputPaths: string[] = [];
     const workerPath = fileURLToPath(new URL("./worker.js", import.meta.url));
     const common = {
-      root: this.root,
-      workspace: this.workspace,
-      tsconfigPath: this.tsconfigPath,
-      fileVersions: [...this.fileVersions],
+      bootstrap: this.getBootstrap(),
       projects: projects.map((project) => ({ path: project.path })),
     };
 
