@@ -43,6 +43,25 @@ a controlled TypeScript project with a local JSX shim.
 - Keep report payloads JSON-serializable and snake_case for parity with goray.
 - Test observable behavior, not implementation details.
 
+## Integration tooling
+
+The MCP/skill installer is covered by `test/integration.test.ts`. It uses temporary homes
+and config files only; never point tests at a real client configuration.
+
+Safe manual checks:
+
+```sh
+node dist/cli/index.js install-mcp \
+  --config /tmp/tsray-mcp.json --format opencode --dry-run --yes
+
+node dist/cli/index.js install-skill \
+  --dir /tmp/tsray-skills --dry-run --yes
+
+npm run pack:check
+```
+
+OpenCode configuration reloads automatically. Other clients may require a restart.
+
 ## Commits
 
 Use focused, atomic commits with conventional prefixes (`feat:`, `fix:`, `test:`, `docs:`,

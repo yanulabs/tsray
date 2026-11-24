@@ -22,3 +22,7 @@ Initial release.
   inspector, command palette, and live refresh.
 - Goray-style ELK layered/orthogonal dependency graph with module colors, edge highlighting,
   DFS back edges, transitive reduction, hub/isolated filters, and fit-to-view controls.
+- Multi-client MCP install/uninstall/status commands for OpenCode, Claude Code, Codex,
+  Cursor, Gemini CLI, Antigravity, and Agents, with atomic JSON/TOML editing.
+- Skill install/uninstall/status commands and Makefile/npm integration targets.
+- npm release workflow with provenance and a packaged agent skill.

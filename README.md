@@ -188,14 +188,101 @@ tsray db prune [--dry-run]
   shared summary DB, `--all` targets both. Sidecar `-wal`/`-shm` files are included.
 - `prune` removes worktree databases whose persisted `canonical_root` no longer exists.
 
-## MCP setup
+## Install and MCP client integration
 
-The binary is `node /absolute/path/to/tsray/dist/cli/index.js`; the server command is
-`serve`. Restart the client after adding the entry.
+### Install the CLI
 
-### OpenCode
+```sh
+npm install
+npm run build
+make install          # npm link; exposes `tsray` on PATH
+tsray version
+```
 
-OpenCode V2 reads servers from `mcp.servers`:
+For a regular global install instead of a development link:
+
+```sh
+npm install --global /absolute/path/to/tsray
+```
+
+The npm package includes the compiled CLI, the embedded report template, and the agent
+skill. `make install-mcp` and `npm run install:mcp` use the current Node executable plus the
+compiled CLI path by default.
+
+### Automated MCP registration
+
+```sh
+make install-mcp                                   # interactive target picker
+make install-mcp MCP_TARGET=opencode                # one client
+make install-mcp MCP_TARGET=opencode,cursor         # several clients
+make install-mcp MCP_TARGET=detected                # detected clients only
+make install-mcp MCP_TARGET=all                     # every supported client
+make install-mcp MCP_SCOPE=project                  # project-local configs
+make install-mcp MCP_ARGS='serve /absolute/repo'    # pin a repository
+make install-mcp MCP_CONFIG=/tmp/mcp.json           # explicit config file
+```
+
+Equivalent npm scripts:
+
+```sh
+npm run install:mcp -- opencode cursor
+npm run mcp:status -- opencode
+npm run uninstall:mcp -- opencode
+```
+
+Or call the CLI directly:
+
+```sh
+tsray install-mcp opencode,cursor
+tsray install-mcp --scope project --target opencode
+tsray mcp-status --target detected
+tsray uninstall-mcp --target installed
+```
+
+Supported targets:
+
+| Target | Global config | Project config | Entry format |
+| --- | --- | --- | --- |
+| `opencode` | `~/.config/opencode/opencode.json` | `./opencode.json` | `mcp.servers.<name>` |
+| `claude` | `~/.claude.json` | `./.mcp.json` | `mcpServers.<name>` |
+| `codex` | `~/.codex/config.toml` | `./.codex/config.toml` | `[mcp_servers.<name>]` |
+| `cursor` | `~/.cursor/mcp.json` | `./.cursor/mcp.json` | `mcpServers.<name>` |
+| `gemini` | `~/.gemini/settings.json` | `./.gemini/settings.json` | `mcpServers.<name>` |
+| `antigravity` | `~/.gemini/config/mcp_config.json` | `./.agents/mcp_config.json` | `mcpServers.<name>` |
+| `agents` | `~/.agents/mcp.json` | `./.agents/mcp.json` | `mcpServers.<name>` |
+
+Target selection accepts numbers, names, comma/space-separated lists, `detected`,
+`installed`, `all`, or an explicit config path. In a non-interactive shell, installation
+defaults to OpenCode; uninstallation defaults to already-installed targets.
+
+Important variables:
+
+| Variable | Purpose |
+| --- | --- |
+| `MCP_NAME` | Server key (default `tsray`) |
+| `MCP_SCOPE` | `global` or `project` |
+| `MCP_TARGET` | Target selection |
+| `MCP_ARGS` | Server arguments (default `serve`) |
+| `MCP_CONFIG` / `MCP_FORMAT` | Explicit config path and format |
+| `MCP_CWD` | Fixed server working directory |
+| `MCP_BIN` | Executable override (for example a compiled Bun binary) |
+| `OPENCODE_CONFIG` | OpenCode config path override |
+| `CLAUDE_CONFIG_DIR` / `CODEX_HOME` | Client-specific home overrides |
+
+The installer edits JSON atomically, preserves existing file permissions, follows symlinked
+config files, and refuses JSONC files rather than risking corruption. For OpenCode JSONC,
+use the client's own command:
+
+```sh
+opencode mcp add tsray --global -- node /absolute/path/to/tsray/dist/cli/index.js serve
+```
+
+OpenCode V2 reloads MCP configuration automatically; verify with `opencode mcp list`.
+Other clients may need a restart. Antigravity spawns stdio servers with `cwd /`, so the
+installer uses `serve ${workspaceFolder}` unless explicit arguments or `MCP_CWD` are
+provided.
+
+The generated OpenCode entry is:
 
 ```jsonc
 {
@@ -216,28 +303,55 @@ OpenCode V2 reads servers from `mcp.servers`:
 ```
 
 The server resolves the active workspace automatically. Pin a repository by appending its
-path to the command.
+path to `MCP_ARGS` or the command.
 
-The repository ships an OpenCode skill at `.opencode/skills/tsray/SKILL.md` with tool routing,
-canonical-ID, and summary-workflow guidance.
+### Agent skill
 
-### Claude Code
+The package ships `.opencode/skills/tsray/SKILL.md` with tool-routing, canonical-ID, and
+summary-workflow guidance.
 
 ```sh
-claude mcp add --scope user tsray -- node /absolute/path/to/tsray/dist/cli/index.js serve
+make install-skill                         # interactive target picker
+make install-skill SKILL_TARGET=opencode
+make install-skill SKILL_TARGET=opencode,claude,agents
+make install-skill SKILL_SCOPE=project
+make install-skill SKILL_DIR=/path/to/skills SKILL_MODE=link
+make uninstall-skill SKILL_TARGET=installed
 ```
 
-### Cursor / generic JSON clients
+Equivalent commands:
 
-```json
-{
-  "mcpServers": {
-    "tsray": {
-      "command": "node",
-      "args": ["/absolute/path/to/tsray/dist/cli/index.js", "serve"]
-    }
-  }
-}
+```sh
+npm run install:skill -- opencode
+npm run skill:status -- opencode
+npm run uninstall:skill -- opencode
+```
+
+Supported skill targets are OpenCode, Claude Code, Codex, Cursor, Gemini CLI, and the shared
+`~/.agents` directory. OpenCode also discovers the Claude and Agents compatibility paths.
+
+### Install or remove everything
+
+```sh
+make install-all       # CLI + skill + MCP registration
+make uninstall-all     # MCP registration + skill + CLI
+```
+
+### Equivalent per-client commands
+
+```sh
+# Claude Code
+claude mcp add --scope user tsray -- node /absolute/path/to/tsray/dist/cli/index.js serve
+
+# Cursor / generic JSON clients
+# {
+#   "mcpServers": {
+#     "tsray": {
+#       "command": "node",
+#       "args": ["/absolute/path/to/tsray/dist/cli/index.js", "serve"]
+#     }
+#   }
+# }
 ```
 
 ## MCP tools
@@ -504,7 +618,8 @@ The report template is embedded, so the binary needs no runtime web files.
 
 ```text
 src/
-  cli/        command routing, git worktree diff
+  cli/        command routing, git worktree diff, MCP/skill integration
+  integration/ atomic JSON/TOML client config editing, detection, skill install
   index/      types, hashing, TypeScript/React indexer, queries, watcher
   cache/      dual SQLite store, summary schemas
   render/     payload, Markdown/DOT/Mermaid/HTML exporters, embedded template
@@ -513,7 +628,7 @@ src/
   util/       paths, globs, source utilities
 web/          React 19 + Tailwind 4 report UI (Vite single-file build)
 test/         vitest suites and the React fixture
-scripts/      report embedding
+scripts/      report embedding and executable post-build step
 ```
 
 ## Limitations

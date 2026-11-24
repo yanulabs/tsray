@@ -55,6 +55,10 @@ in a `WeakMap` keyed by the snapshot, so MCP calls reuse them until the snapshot
 | `src/tools/runner.ts` | package-manager/script/test/lint/typecheck detection |
 | `src/cli/index.ts` | CLI parsing and command routing |
 | `src/cli/diff.ts` | Detached worktree diff and CI gates |
+| `src/cli/integration.ts` | MCP/skill target selection and command orchestration |
+| `src/integration/config.ts` | Atomic JSON/TOML MCP config editing and validation |
+| `src/integration/clients.ts` | Client config paths, format inference, and detection |
+| `src/integration/skills.ts` | Skill copy/link/status/removal |
 | `web/` | React 19 report UI, built into `web/dist/report.html` |
 
 ## Mapping from goray
@@ -70,6 +74,7 @@ in a `WeakMap` keyed by the snapshot, so MCP calls reuse them until the snapshot
 | `internal/mcp` JSON-RPC | `@modelcontextprotocol/sdk` `McpServer` + `StdioServerTransport` |
 | `go:embed` report | gzip+base64 embedded Vite single-file template |
 | `go test` / `golangci-lint` | Detected package scripts, vitest/jest, tsc, eslint/biome |
+| `make install-mcp` + Python helper | TypeScript integration CLI + Makefile/npm wrappers |
 
 ## TypeScript project loading
 
@@ -267,6 +272,32 @@ to `false`; the server sets it to `true`, and the UI polls `/api/report`.
 
 `web/dist/report.html` is committed to mirror `goray`'s embedded artifact and to make the
 build inspectable. `npm run build:web` refreshes both the HTML and the generated TS module.
+
+## MCP client integration
+
+`tsray install-mcp`, `uninstall-mcp`, and `mcp-status` share one TypeScript integration
+layer. Supported clients are OpenCode, Claude Code, Codex, Cursor, Gemini CLI, Antigravity,
+and the shared Agents directory.
+
+The integration layer:
+
+- resolves global/project config paths, including `XDG_CONFIG_HOME`, `OPENCODE_CONFIG`,
+  `CLAUDE_CONFIG_DIR`, and `CODEX_HOME`;
+- detects installed clients from config directories, executables, and known application
+  paths;
+- accepts numbered/name/comma/space target selections plus `detected`, `installed`, `all`,
+  and explicit config paths;
+- edits OpenCode V2 `mcp.servers` and removes legacy duplicate entries;
+- edits `mcpServers` JSON for Claude/Cursor/Gemini/Antigravity/Agents;
+- preserves unrelated Codex TOML while replacing only the selected `mcp_servers.<name>`
+  block, then validates the result with `smol-toml`;
+- writes atomically, preserves existing permissions, defaults new config files to `0600`,
+  follows symlinks, and refuses JSONC rather than risking corruption;
+- uses `serve ${workspaceFolder}` for Antigravity's `/` working-directory behavior;
+- installs/removes the bundled skill as a copy or symlink without deleting its source.
+
+The Makefile and npm scripts are thin wrappers around these CLI commands. OpenCode reloads
+MCP configuration automatically; other clients are told to restart.
 
 ## MCP and HTTP lifecycle
 
