@@ -5,7 +5,16 @@ import { DatabaseSync } from "node:sqlite";
 import type { StatementSync } from "node:sqlite";
 import { sha256 } from "../index/hasher.js";
 import { validateSummary } from "./summary.js";
-import type { IndexSnapshot, StalenessState, SymbolRecord } from "../index/types.js";
+import type {
+  CachedSymbolSignature,
+  DiagnosticCacheProvider,
+  DiagnosticCacheSnapshot,
+  DiagnosticCacheWrite,
+  DiagnosticWarning,
+  IndexSnapshot,
+  StalenessState,
+  SymbolRecord,
+} from "../index/types.js";
 
 export interface DbPaths {
   workingPath: string;
@@ -250,7 +259,7 @@ export function pruneWorktreeDatabases(options: { dryRun?: boolean } = {}): Prun
   return result;
 }
 
-export class DualCacheStore {
+export class DualCacheStore implements DiagnosticCacheProvider {
   readonly workingPath: string;
   readonly summaryPath: string;
   readonly promptVersion: string;
@@ -351,6 +360,12 @@ export class DualCacheStore {
         exports INTEGER NOT NULL,
         imports INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS diagnostic_cache (
+        project_key TEXT NOT NULL,
+        epoch TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        PRIMARY KEY (project_key, epoch)
+      );
     `);
   }
 
@@ -393,6 +408,82 @@ export class DualCacheStore {
       this.statements.set(key, statement);
     }
     return statement;
+  }
+
+  readDiagnostics(projectKey: string, epoch: string): DiagnosticCacheSnapshot | null {
+    const row = this.workingDb
+      .prepare("SELECT payload_json FROM diagnostic_cache WHERE project_key = ? AND epoch = ?")
+      .get(projectKey, epoch) as { payload_json: string } | undefined;
+    if (!row) return null;
+    try {
+      const files = JSON.parse(row.payload_json) as unknown;
+      if (!Array.isArray(files)) return null;
+      const diagnostics = new Map<string, DiagnosticWarning[]>();
+      const symbols = new Map<string, CachedSymbolSignature>();
+      for (const entry of files) {
+        if (
+          !entry ||
+          typeof entry !== "object" ||
+          typeof entry.path !== "string" ||
+          !Array.isArray(entry.diagnostics) ||
+          !Array.isArray(entry.symbols)
+        ) {
+          return null;
+        }
+        const validDiagnostics = entry.diagnostics.every((item: unknown) => {
+          if (!item || typeof item !== "object") return false;
+          const value = item as Record<string, unknown>;
+          return (
+            typeof value.file === "string" &&
+            typeof value.line === "number" &&
+            typeof value.code === "number" &&
+            typeof value.message === "string" &&
+            typeof value.isTest === "boolean"
+          );
+        });
+        const validSymbols = entry.symbols.every((item: unknown) => {
+          if (!item || typeof item !== "object") return false;
+          const value = item as Record<string, unknown>;
+          return (
+            typeof value.id === "string" &&
+            typeof value.kind === "string" &&
+            (value.propsType === null || typeof value.propsType === "string") &&
+            typeof value.signature === "string"
+          );
+        });
+        if (!validDiagnostics || !validSymbols) return null;
+        diagnostics.set(entry.path, entry.diagnostics as DiagnosticWarning[]);
+        for (const symbol of entry.symbols as CachedSymbolSignature[]) symbols.set(symbol.id, symbol);
+      }
+      return { diagnostics, symbols };
+    } catch {
+      return null;
+    }
+  }
+
+  writeDiagnostics(entries: DiagnosticCacheWrite[]): void {
+    if (entries.length === 0) return;
+    const removeOld = this.workingDb.prepare(
+      "DELETE FROM diagnostic_cache WHERE project_key = ? AND epoch <> ?"
+    );
+    const insert = this.workingDb.prepare(
+      "INSERT OR REPLACE INTO diagnostic_cache (project_key, epoch, payload_json) VALUES (?, ?, ?)"
+    );
+    this.workingDb.exec("BEGIN IMMEDIATE");
+    try {
+      for (const entry of entries) {
+        removeOld.run(entry.projectKey, entry.epoch);
+        insert.run(entry.projectKey, entry.epoch, JSON.stringify(entry.files));
+      }
+      this.workingDb.exec("COMMIT");
+    } catch (error) {
+      try {
+        this.workingDb.exec("ROLLBACK");
+      } catch {
+        // The transaction may already be closed by SQLite.
+      }
+      throw error;
+    }
   }
 
   syncWorking(snapshot: IndexSnapshot): void {

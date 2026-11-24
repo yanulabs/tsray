@@ -143,9 +143,16 @@ working snapshot. Workspace indexes update by default and report diagnostics wit
 blocking; use `--allow-errors` for the same behavior in a single project. Errors confined to
 test/story files become warnings and exit `0`. Use `--json` for machine-readable output.
 
-Full multi-project indexes use worker threads, bounded by available CPUs and memory (up to eight
-workers by default). Set `TSRAY_WORKERS=1` for sequential indexing or raise it when profiling a
-large workspace. Single-project and incremental rebuilds stay in the main process.
+Full multi-project indexes use worker threads, bounded by available CPUs and a roughly 2 GB
+per-worker memory budget (up to eight workers by default). Set `TSRAY_WORKERS=1` for sequential
+indexing or raise it when profiling a large workspace. Single-project and incremental rebuilds
+stay in the main process.
+
+Full rebuilds also persist per-file TypeScript diagnostics and signature metadata in the working
+SQLite database. A workspace epoch includes resolved compiler options, the TypeScript version,
+source-file fingerprints, package manifests, and lockfiles. Unchanged reindexes reuse cached
+diagnostics and signatures; normal source/config/dependency edits invalidate the epoch and
+trigger a full diagnostic pass. Use `tsray db rm <path>` to force a cold diagnostic rebuild.
 
 ### `export`
 

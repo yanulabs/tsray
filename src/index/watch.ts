@@ -59,7 +59,9 @@ export class IndexController {
     readonly indexer: TsReactIndexer,
     readonly store: DualCacheStore,
     private readonly log: (message: string) => void = () => {}
-  ) {}
+  ) {
+    indexer.setDiagnosticCache(store);
+  }
 
   status(): IndexControllerStatus {
     const state: IndexControllerStatus["index_state"] = this.building

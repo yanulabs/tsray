@@ -159,6 +159,43 @@ describe("dual SQLite summary cache", () => {
     }
   });
 
+  it("reuses persistent diagnostics until the workspace epoch changes", () => {
+    const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-diagnostics-"));
+    cleanup.push(temporary);
+    fs.cpSync(fixture, temporary, { recursive: true });
+    const database = path.join(temporary, "cache.db");
+    const run = () => {
+      const indexer = new TsReactIndexer(temporary, { parallel: false });
+      const store = new DualCacheStore(indexer.root, indexer.projectId, { overrideDb: database });
+      indexer.setDiagnosticCache(store);
+      try {
+        const snapshot = indexer.buildIndex({ fullDiagnostics: true });
+        store.syncWorking(snapshot);
+        return snapshot;
+      } finally {
+        store.close();
+      }
+    };
+
+    const cold = run();
+    const warm = run();
+    expect(cold.diagnosticsCached).toBe(0);
+    expect(warm.diagnosticsCached).toBe(warm.filesCount);
+    expect(warm.prodErrors).toEqual(cold.prodErrors);
+    expect(warm.warnings).toEqual(cold.warnings);
+    expect(warm.symbols).toEqual(cold.symbols);
+    expect(warm.edges).toEqual(cold.edges);
+
+    const app = path.join(temporary, "src/App.tsx");
+    fs.writeFileSync(
+      app,
+      fs.readFileSync(app, "utf8").replace("const theme = useTheme();", "const theme: number = useTheme();")
+    );
+    const changed = run();
+    expect(changed.diagnosticsCached).toBe(0);
+    expect(changed.prodErrors.length).toBeGreaterThan(0);
+  });
+
   it("computes coverage by kind and module", () => {
     const { snapshot, store } = build();
     try {

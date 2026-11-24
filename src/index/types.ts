@@ -113,6 +113,35 @@ export interface DiagnosticWarning {
   isTest: boolean;
 }
 
+export interface CachedSymbolSignature {
+  id: string;
+  kind: SymbolKind;
+  propsType: string | null;
+  signature: string;
+}
+
+export interface DiagnosticCacheFile {
+  path: string;
+  diagnostics: DiagnosticWarning[];
+  symbols: CachedSymbolSignature[];
+}
+
+export interface DiagnosticCacheWrite {
+  projectKey: string;
+  epoch: string;
+  files: DiagnosticCacheFile[];
+}
+
+export interface DiagnosticCacheSnapshot {
+  diagnostics: Map<string, DiagnosticWarning[]>;
+  symbols: Map<string, CachedSymbolSignature>;
+}
+
+export interface DiagnosticCacheProvider {
+  readDiagnostics(projectKey: string, epoch: string): DiagnosticCacheSnapshot | null;
+  writeDiagnostics(entries: DiagnosticCacheWrite[]): void;
+}
+
 export interface ProjectConfigInfo {
   path: string;
   fileCount: number;
@@ -137,6 +166,8 @@ export interface IndexSnapshot {
   prodErrors: DiagnosticWarning[];
   filesCount: number;
   modules: string[];
+  /** Files whose diagnostics were served from the persistent workspace cache. */
+  diagnosticsCached?: number;
 }
 
 export interface CachedSummary {

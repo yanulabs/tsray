@@ -130,6 +130,7 @@ function createContext(target: string, values: Record<string, string | boolean |
   };
   const indexer = new TsReactIndexer(target, indexerOptions);
   const store = new DualCacheStore(indexer.root, indexer.projectId, storeOptions(values, indexer));
+  indexer.setDiagnosticCache(store);
   return { indexer, store };
 }
 
@@ -262,6 +263,7 @@ async function main(): Promise<void> {
     };
     const indexer = new TsReactIndexer(target, indexerOptions);
     const store = new DualCacheStore(indexer.root, indexer.projectId, storeOptions(values, indexer));
+    indexer.setDiagnosticCache(store);
     const logLevel = (stringValue(values["log-level"]) ?? process.env.TSRAY_LOG_LEVEL ?? "info") as
       | "off"
       | "error"
@@ -353,6 +355,7 @@ async function main(): Promise<void> {
         module_cycles: snapshot.moduleCycles.length,
         warnings: snapshot.warnings.length,
         prod_errors: snapshot.prodErrors.length,
+        diagnostics_cached: snapshot.diagnosticsCached ?? 0,
         summary_coverage_percent: coverage.percent,
         duration_ms: snapshot.durationMs,
       };
@@ -369,6 +372,7 @@ async function main(): Promise<void> {
             `  Edges:      ${result.edges}\n` +
             `  Cycles:     ${result.module_cycles}\n` +
             `  Duration:   ${result.duration_ms}ms\n` +
+            (result.diagnostics_cached > 0 ? `  Cached:     ${result.diagnostics_cached} diagnostic file(s)\n` : "") +
             `  Working DB: ${result.db_path}\n` +
             `  Summary DB: ${result.summary_db_path}\n`
         );

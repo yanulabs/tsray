@@ -3,9 +3,14 @@ import os from "node:os";
 import path from "node:path";
 import { Worker } from "node:worker_threads";
 import { fileURLToPath } from "node:url";
+import { createHash } from "node:crypto";
 import ts from "typescript";
-import { computeDirectHashes, computeGraphHashes, findDirectedCycles, normalizeNodeText } from "./hasher.js";
+import { computeDirectHashes, computeGraphHashes, findDirectedCycles, normalizeNodeText, stableStringify } from "./hasher.js";
 import type {
+  CachedSymbolSignature,
+  DiagnosticCacheFile,
+  DiagnosticCacheProvider,
+  DiagnosticCacheWrite,
   DiagnosticWarning,
   EdgeKind,
   EdgeRecord,
@@ -43,12 +48,14 @@ import { TEST_FILE_RE } from "../util/glob.js";
 export interface IndexerOptions {
   tsconfig?: string;
   workspace?: boolean;
-  /** Recompute every file's diagnostics instead of using the incremental cache. */
+  /** Recompute diagnostics unless a matching persistent workspace cache exists. */
   fullDiagnostics?: boolean;
   /** Serve and persist the semantic graph even when production diagnostics exist. */
   allowErrors?: boolean;
   /** Process independent owning projects in worker threads during full builds. */
   parallel?: boolean;
+  /** Optional SQLite-backed diagnostic cache for full workspace rebuilds. */
+  diagnosticCache?: DiagnosticCacheProvider;
 }
 
 /** @internal */
@@ -82,6 +89,7 @@ export interface SerializedProjectIndex {
   prodErrors: DiagnosticWarning[];
   modules: string[];
   diagnostics: Array<[string, DiagnosticCacheEntry]>;
+  diagnosticsCached: number;
 }
 
 export interface ProjectWorkerTask {
@@ -100,6 +108,9 @@ export interface IndexerBootstrap {
   packageEntrypoints: string[];
   fileList: string[];
   fileVersions: Array<[string, number]>;
+  diagnosticEpoch: string | null;
+  persistentDiagnostics: Array<[string, DiagnosticWarning[]]>;
+  persistentSymbols: Array<[string, CachedSymbolSignature]>;
 }
 
 export interface ProjectWorkerOutput {
@@ -150,6 +161,11 @@ export class TsReactIndexer {
   private lastHealthySnapshot: IndexSnapshot | null = null;
   private lastSnapshot: IndexSnapshot | null = null;
   private packageEntrypoints: string[] = [];
+  private diagnosticCache: DiagnosticCacheProvider | null = null;
+  private diagnosticEpoch: string | null = null;
+  private persistentDiagnostics = new Map<string, DiagnosticWarning[]>();
+  private persistentSymbols = new Map<string, CachedSymbolSignature>();
+  private diagnosticCacheHits = 0;
 
   constructor(targetPath: string, options: IndexerOptions = {}, bootstrap?: IndexerBootstrap) {
     if (bootstrap) {
@@ -167,6 +183,9 @@ export class TsReactIndexer {
       this.fileSet = new Set(this.fileList);
       for (const [file, version] of bootstrap.fileVersions) this.fileVersions.set(file, version);
       this.packageEntrypoints = [...bootstrap.packageEntrypoints];
+      this.diagnosticEpoch = bootstrap.diagnosticEpoch;
+      this.persistentDiagnostics = new Map(bootstrap.persistentDiagnostics);
+      this.persistentSymbols = new Map(bootstrap.persistentSymbols);
       return;
     }
 
@@ -179,6 +198,7 @@ export class TsReactIndexer {
     this.allowErrors = options.allowErrors ?? resolved.workspace;
     this.parallel = options.parallel ?? true;
     this.config = resolved.config;
+    this.diagnosticCache = options.diagnosticCache ?? null;
 
     this.loadProjects();
     this.packageEntrypoints = this.collectPackageEntrypoints();
@@ -194,6 +214,11 @@ export class TsReactIndexer {
     );
   }
 
+  /** Attach persistent diagnostics after the SQLite store has been resolved. */
+  setDiagnosticCache(provider: DiagnosticCacheProvider): void {
+    this.diagnosticCache = provider;
+  }
+
   /** @internal Capture one project/version epoch for worker threads. */
   getBootstrap(): IndexerBootstrap {
     return {
@@ -207,6 +232,9 @@ export class TsReactIndexer {
       packageEntrypoints: this.packageEntrypoints,
       fileList: this.fileList,
       fileVersions: [...this.fileVersions],
+      diagnosticEpoch: this.diagnosticEpoch,
+      persistentDiagnostics: [...this.persistentDiagnostics],
+      persistentSymbols: [...this.persistentSymbols],
     };
   }
 
@@ -370,6 +398,7 @@ export class TsReactIndexer {
   buildProjectIndex(configPath: string, fullDiagnostics: boolean): SerializedProjectIndex {
     const project = this.activeProjects.find((candidate) => candidate.path === configPath);
     if (!project) throw new Error(`Project is not assigned to this worker: ${configPath}`);
+    const cacheHitsBefore = this.diagnosticCacheHits;
     const accumulator = this.indexProjectLocal(project, fullDiagnostics);
     return {
       projectPath: project.path,
@@ -381,6 +410,7 @@ export class TsReactIndexer {
       prodErrors: accumulator.prodErrors,
       modules: [...accumulator.modules],
       diagnostics: this.drainDiagnosticsCache(),
+      diagnosticsCached: this.diagnosticCacheHits - cacheHitsBefore,
     };
   }
 
@@ -456,6 +486,25 @@ export class TsReactIndexer {
   buildIndex(options: IndexerOptions = {}): IndexSnapshot {
     const started = performance.now();
     const fullDiagnostics = options.fullDiagnostics ?? this.dirtyFiles.size === 0;
+    this.diagnosticCacheHits = 0;
+    if (fullDiagnostics && this.diagnosticCache) {
+      this.diagnosticEpoch = this.computeDiagnosticEpoch();
+      this.persistentDiagnostics.clear();
+      this.persistentSymbols.clear();
+      for (const project of this.activeProjects) {
+        const cached = this.diagnosticCache.readDiagnostics(project.path, this.diagnosticEpoch);
+        if (cached) {
+          for (const [file, diagnostics] of cached.diagnostics) {
+            this.persistentDiagnostics.set(path.resolve(this.root, file), diagnostics);
+          }
+          for (const [id, symbol] of cached.symbols) this.persistentSymbols.set(id, symbol);
+        }
+      }
+    } else {
+      this.diagnosticEpoch = null;
+      this.persistentDiagnostics.clear();
+      this.persistentSymbols.clear();
+    }
     const accumulator = this.createAccumulator();
     const workerResults = new Map<string, SerializedProjectIndex>();
 
@@ -474,6 +523,9 @@ export class TsReactIndexer {
       } else {
         this.mergeProject(accumulator, this.indexProjectLocal(project, fullDiagnostics));
       }
+    }
+    if (fullDiagnostics && this.diagnosticCache && this.diagnosticEpoch) {
+      this.persistDiagnostics(accumulator.symbols);
     }
     this.dirtyFiles.clear();
 
@@ -541,11 +593,92 @@ export class TsReactIndexer {
       prodErrors,
       filesCount: files.size,
       modules: [...moduleSet].sort(),
+      diagnosticsCached: this.diagnosticCacheHits,
     };
 
     this.lastSnapshot = snapshot;
     if (prodErrors.length === 0) this.lastHealthySnapshot = snapshot;
     return snapshot;
+  }
+
+  private computeDiagnosticEpoch(): string {
+    const hash = createHash("sha256");
+    const add = (label: string, content: string): void => {
+      hash.update(label);
+      hash.update("\0");
+      hash.update(String(content.length));
+      hash.update("\0");
+      hash.update(content);
+      hash.update("\0");
+    };
+    add("version", "tsray-diagnostics:v3");
+    add("typescript", ts.version);
+    add("platform", `${process.platform}:${process.arch}`);
+
+    for (const project of [...this.parsedProjects].sort((a, b) => a.path.localeCompare(b.path))) {
+      add(`project:${project.path}`, stableStringify(project.options));
+    }
+    for (const file of this.fileList) {
+      add(`source:${toPosix(path.relative(this.root, file))}`, this.cacheInputFingerprint(file));
+    }
+
+    const manifests = new Set<string>();
+    const names = [
+      "package.json",
+      "pnpm-workspace.yaml",
+      "pnpm-lock.yaml",
+      "package-lock.json",
+      "npm-shrinkwrap.json",
+      "yarn.lock",
+      "bun.lock",
+      "bun.lockb",
+      "node_modules/.modules.yaml",
+      "node_modules/.package-lock.json",
+    ];
+    const addDirectory = (directory: string): void => {
+      for (const name of names) manifests.add(path.join(directory, name));
+    };
+    addDirectory(this.root);
+    for (const project of this.parsedProjects) addDirectory(path.dirname(project.path));
+    for (const manifest of [...manifests].sort()) {
+      if (fs.existsSync(manifest)) {
+        add(`manifest:${toPosix(path.relative(this.root, manifest))}`, this.cacheInputFingerprint(manifest));
+      }
+    }
+    return hash.digest("hex");
+  }
+
+  private cacheInputFingerprint(file: string): string {
+    try {
+      const stat = fs.statSync(file);
+      return `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}:${stat.ino}`;
+    } catch {
+      return `missing:${file}`;
+    }
+  }
+
+  private persistDiagnostics(symbols: Map<string, SymbolRecord>): void {
+    if (!this.diagnosticCache || !this.diagnosticEpoch) return;
+    const symbolsByFile = new Map<string, CachedSymbolSignature[]>();
+    for (const symbol of symbols.values()) {
+      const list = symbolsByFile.get(symbol.file) ?? [];
+      list.push({ id: symbol.id, kind: symbol.kind, propsType: symbol.propsType, signature: symbol.signature });
+      symbolsByFile.set(symbol.file, list);
+    }
+    const writes: DiagnosticCacheWrite[] = [];
+    for (const project of this.activeProjects) {
+      const files: DiagnosticCacheFile[] = [];
+      for (const absolute of project.ownedFiles) {
+        const entry = this.diagnosticsCache.get(absolute);
+        const relative = toPosix(path.relative(this.root, absolute));
+        const file = relative.startsWith("..") ? absolute : relative;
+        const cachedSymbols = symbolsByFile.get(file) ?? [];
+        if (!entry && cachedSymbols.length === 0) continue;
+        files.push({ path: file, diagnostics: entry?.diagnostics ?? [], symbols: cachedSymbols });
+      }
+      writes.push({ projectKey: project.path, epoch: this.diagnosticEpoch, files });
+    }
+    this.diagnosticCache.writeDiagnostics(writes);
   }
 
   private createAccumulator(): IndexAccumulator {
@@ -639,6 +772,7 @@ export class TsReactIndexer {
     target.prodErrors.push(...source.prodErrors);
     for (const module of source.modules) target.modules.add(module);
     for (const [file, diagnostic] of source.diagnostics) this.diagnosticsCache.set(file, diagnostic);
+    this.diagnosticCacheHits += source.diagnosticsCached;
   }
 
   private workerScriptExists(): boolean {
@@ -830,6 +964,13 @@ export class TsReactIndexer {
       const absolute = path.resolve(sourceFile.fileName);
       const version = String(this.fileVersions.get(absolute) ?? 0);
       const cached = this.diagnosticsCache.get(absolute);
+      const persistent = this.persistentDiagnostics.get(absolute);
+      if (persistent !== undefined) {
+        diagnosticsByFile.set(absolute, persistent);
+        this.diagnosticsCache.set(absolute, { version, diagnostics: persistent });
+        this.diagnosticCacheHits++;
+        continue;
+      }
       if (!fullDiagnostics && cached?.version === version) {
         diagnosticsByFile.set(absolute, cached.diagnostics);
         continue;
@@ -883,17 +1024,24 @@ export class TsReactIndexer {
       signature: string,
       members = 0,
       parentId: string | null = null,
-      hashSignature = signature
+      hashSignature?: string
     ): string => {
       const relative = relOf(sourceFile);
       const id = container
         ? `sym:${relative}:${container}#${name}`
         : `sym:${relative}#${name}`;
+      const cachedSymbol = this.persistentSymbols.get(id);
+      if (cachedSymbol) {
+        kind = cachedSymbol.kind;
+        propsType = cachedSymbol.propsType;
+        signature = cachedSymbol.signature;
+      }
+      const effectiveHashSignature = hashSignature ?? signature;
       const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
       const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
       const directive = getFileDirective(sourceFile);
       const normalized = normalizeNodeText(node, sourceFile);
-      const { sigHash, selfHash } = computeDirectHashes(hashSignature, normalized, directive);
+      const { sigHash, selfHash } = computeDirectHashes(effectiveHashSignature, normalized, directive);
       const existing = symbols.get(id);
       const hasBody = isNodeWithBody(node);
 
