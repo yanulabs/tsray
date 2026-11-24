@@ -13,8 +13,10 @@
   "files": [
     "dist",
     "web/dist/report.html",
+    ".opencode/skills/tsray/SKILL.md",
     "README.md",
-    "LICENSE"
+    "LICENSE",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
@@ -25,11 +27,25 @@
     "test:watch": "vitest",
     "typecheck": "tsc -p tsconfig.json --noEmit && tsc -p tsconfig.test.json --noEmit",
     "lint": "eslint src test --max-warnings 0",
-    "verify": "npm run lint && npm run typecheck && npm run test"
+    "verify": "npm run lint && npm run typecheck && npm run test",
+    "install:mcp": "node dist/cli/index.js install-mcp",
+    "uninstall:mcp": "node dist/cli/index.js uninstall-mcp",
+    "mcp:status": "node dist/cli/index.js mcp-status",
+    "install:skill": "node dist/cli/index.js install-skill",
+    "uninstall:skill": "node dist/cli/index.js uninstall-skill",
+    "skill:status": "node dist/cli/index.js skill-status",
+    "install:all": "npm run build && npm link && npm run install:skill && npm run install:mcp",
+    "uninstall:all": "npm run uninstall:mcp && npm run uninstall:skill && npm uninstall --global tsray",
+    "prepublishOnly": "npm run verify && npm run build",
+    "pack:check": "npm pack --dry-run"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "chokidar": "^4.0.3",
+    "smol-toml": "^1.9.1",
     "typescript": "^5.9.3",
     "zod": "^4.6.7"
   },
