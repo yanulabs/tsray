@@ -130,7 +130,7 @@ function createContext(target: string, values: Record<string, string | boolean |
   };
   const indexer = new TsReactIndexer(target, indexerOptions);
   const store = new DualCacheStore(indexer.root, indexer.projectId, storeOptions(values, indexer));
-  indexer.setDiagnosticCache(store);
+  indexer.setProjectCache(store);
   return { indexer, store };
 }
 
@@ -263,7 +263,7 @@ async function main(): Promise<void> {
     };
     const indexer = new TsReactIndexer(target, indexerOptions);
     const store = new DualCacheStore(indexer.root, indexer.projectId, storeOptions(values, indexer));
-    indexer.setDiagnosticCache(store);
+    indexer.setProjectCache(store);
     const logLevel = (stringValue(values["log-level"]) ?? process.env.TSRAY_LOG_LEVEL ?? "info") as
       | "off"
       | "error"
@@ -356,6 +356,11 @@ async function main(): Promise<void> {
         warnings: snapshot.warnings.length,
         prod_errors: snapshot.prodErrors.length,
         diagnostics_cached: snapshot.diagnosticsCached ?? 0,
+        projects_total: snapshot.projectMetrics?.projects_total ?? 0,
+        projects_cached: snapshot.projectMetrics?.projects_cached ?? 0,
+        projects_rebuilt: snapshot.projectMetrics?.projects_rebuilt ?? 0,
+        projects_empty: snapshot.projectMetrics?.projects_empty ?? 0,
+        workers_spawned: snapshot.projectMetrics?.workers_spawned ?? 0,
         summary_coverage_percent: coverage.percent,
         duration_ms: snapshot.durationMs,
       };
@@ -371,6 +376,8 @@ async function main(): Promise<void> {
             `  Symbols:    ${result.symbols} (${result.eligible} eligible)\n` +
             `  Edges:      ${result.edges}\n` +
             `  Cycles:     ${result.module_cycles}\n` +
+            `  Projects:   ${result.projects_cached} cached / ${result.projects_rebuilt} rebuilt / ${result.projects_empty} empty\n` +
+            `  Workers:    ${result.workers_spawned}\n` +
             `  Duration:   ${result.duration_ms}ms\n` +
             (result.diagnostics_cached > 0 ? `  Cached:     ${result.diagnostics_cached} diagnostic file(s)\n` : "") +
             `  Working DB: ${result.db_path}\n` +

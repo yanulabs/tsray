@@ -60,7 +60,7 @@ export class IndexController {
     readonly store: DualCacheStore,
     private readonly log: (message: string) => void = () => {}
   ) {
-    indexer.setDiagnosticCache(store);
+    indexer.setProjectCache(store);
   }
 
   status(): IndexControllerStatus {

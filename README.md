@@ -143,16 +143,20 @@ working snapshot. Workspace indexes update by default and report diagnostics wit
 blocking; use `--allow-errors` for the same behavior in a single project. Errors confined to
 test/story files become warnings and exit `0`. Use `--json` for machine-readable output.
 
-Full multi-project indexes use worker threads, bounded by available CPUs and a roughly 2 GB
-per-worker memory budget (up to eight workers by default). Set `TSRAY_WORKERS=1` for sequential
-indexing or raise it when profiling a large workspace. Single-project and incremental rebuilds
-stay in the main process.
+Full multi-project indexes use worker threads only for projects that miss the persistent cache.
+The default worker count is `clamp(1, 8, floor(availableMemoryGB / 1.5))`, including Linux cgroup
+limits and macOS/Windows headroom. `TSRAY_WORKERS` remains an explicit override.
 
-Full rebuilds also persist per-file TypeScript diagnostics and signature metadata in the working
-SQLite database. A workspace epoch includes resolved compiler options, the TypeScript version,
-source-file fingerprints, package manifests, and lockfiles. Unchanged reindexes reuse cached
-diagnostics and signatures; normal source/config/dependency edits invalidate the epoch and
-trigger a full diagnostic pass. Use `tsray db rm <path>` to force a cold diagnostic rebuild.
+Each non-empty project persists its symbols, edges, imports, module stats, diagnostics, input
+fingerprint, and exported-API signature hash in the working SQLite database. Cache keys include
+source content hashes, resolved compiler options, the TypeScript version, scoped package/lockfile
+dependencies, and upstream project signature hashes. Unchanged projects are hydrated without
+creating a TypeScript program. Implementation-only edits rebuild only the edited project;
+exported API changes cascade to affected dependents. Solution/aggregator configs with no owned
+files are reported as `projects_empty`. Use `tsray db rm <path>` to force a cold rebuild.
+
+JSON output and `project_info` expose `projects_total`, `projects_cached`, `projects_rebuilt`,
+`projects_empty`, `workers_spawned`, and `diagnostics_cached`.
 
 ### `export`
 

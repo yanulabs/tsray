@@ -113,6 +113,35 @@ export interface DiagnosticWarning {
   isTest: boolean;
 }
 
+export interface ProjectIndexMetrics {
+  projects_total: number;
+  projects_cached: number;
+  projects_rebuilt: number;
+  projects_empty: number;
+  workers_spawned: number;
+  diagnostics_cached: number;
+}
+
+export interface ProjectCacheEntry {
+  cacheVersion: 1;
+  projectPath: string;
+  inputHash: string;
+  projectSigHash: string;
+  outputHash: string;
+  symbols: SymbolRecord[];
+  edges: EdgeRecord[];
+  fileImports: FileImportEdge[];
+  files: FileRecord[];
+  warnings: DiagnosticWarning[];
+  prodErrors: DiagnosticWarning[];
+  modules: string[];
+}
+
+export interface ProjectCacheProvider {
+  readProjects(projectPaths: string[]): Map<string, ProjectCacheEntry>;
+  writeProjects(entries: ProjectCacheEntry[]): void;
+}
+
 export interface CachedSymbolSignature {
   id: string;
   kind: SymbolKind;
@@ -168,6 +197,8 @@ export interface IndexSnapshot {
   modules: string[];
   /** Files whose diagnostics were served from the persistent workspace cache. */
   diagnosticsCached?: number;
+  projectMetrics?: ProjectIndexMetrics;
+  graphDigest?: string;
 }
 
 export interface CachedSummary {

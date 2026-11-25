@@ -32,7 +32,7 @@ try {
     const projectIndex = Atomics.add(queue, 0, 1);
     const project = data.projects[projectIndex];
     if (!project) break;
-    results.push(indexer.buildProjectIndex(project.path, true));
+    results.push(indexer.buildProjectIndex(project.path, data.fullDiagnostics));
   }
   output = { results };
 } catch (error) {
