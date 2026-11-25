@@ -18,6 +18,7 @@ import type {
   ProjectCacheEntry,
   ProjectCacheProvider,
   ProjectConfigInfo,
+  ProjectIndexDetail,
   ProjectIndexMetrics,
   SymbolKind,
   SymbolRecord,
@@ -490,7 +491,7 @@ export class TsReactIndexer {
     const started = performance.now();
     const fullDiagnostics = options.fullDiagnostics ?? this.dirtyFiles.size === 0;
     const accumulator = this.createAccumulator();
-    const { entries, metrics } = this.resolveProjectEntries(fullDiagnostics);
+    const { entries, metrics, details } = this.resolveProjectEntries(fullDiagnostics);
 
     for (const project of this.activeProjects) {
       const entry = entries.get(project.path);
@@ -565,6 +566,7 @@ export class TsReactIndexer {
       modules: [...moduleSet].sort(),
       diagnosticsCached: metrics.diagnostics_cached,
       projectMetrics: metrics,
+      projectDetails: details,
       graphDigest: this.computeWorkspaceGraphDigest(
         this.activeProjects.map((project) => entries.get(project.path)!)
       ),
@@ -578,6 +580,7 @@ export class TsReactIndexer {
   private resolveProjectEntries(fullDiagnostics: boolean): {
     entries: Map<string, ProjectCacheEntry>;
     metrics: ProjectIndexMetrics;
+    details: ProjectIndexDetail[];
   } {
     const metrics: ProjectIndexMetrics = {
       projects_total: this.activeProjects.length,
@@ -588,15 +591,34 @@ export class TsReactIndexer {
       diagnostics_cached: 0,
     };
     const entries = new Map<string, ProjectCacheEntry>();
+    const details: ProjectIndexDetail[] = this.parsedProjects
+      .filter((project) => project.ownedFiles.length === 0)
+      .map((project) => ({
+        project: this.projectCacheKey(project.path),
+        status: "empty",
+        files: 0,
+        diagnostics_cached: 0,
+        project_sig_hash: null,
+      }));
     if (!this.projectCache) {
       const results = this.runProjects(this.activeProjects, fullDiagnostics);
       metrics.workers_spawned = results.workersSpawned;
       metrics.projects_rebuilt = this.activeProjects.length;
       for (const project of this.activeProjects) {
         const result = results.results.get(project.path) ?? this.indexProjectLocal(project, fullDiagnostics);
-        entries.set(project.path, this.createProjectCacheEntry(project.path, "", result));
+        const entry = this.createProjectCacheEntry(project.path, "", result);
+        entries.set(project.path, entry);
+        details.push({
+          project: this.projectCacheKey(project.path),
+          status: "rebuilt",
+          files: result.symbols instanceof Map
+            ? (result as IndexAccumulator).files.size
+            : (result as SerializedProjectIndex).files.length,
+          diagnostics_cached: 0,
+          project_sig_hash: entry.projectSigHash,
+        });
       }
-      return { entries, metrics };
+      return { entries, metrics, details };
     }
 
     const dependencies = this.dependencyIndex ??= new WorkspaceDependencyIndex(
@@ -628,7 +650,9 @@ export class TsReactIndexer {
         const inputHash = this.computeProjectInputHash(project, dependencies, upstream, signatures, sourceHashes);
         let hit = this.projectEntryCache.get(project.path);
         if (!hit || hit.inputHash !== inputHash) {
-          hit = this.projectCache.readProjects([project.path]).get(project.path);
+          hit = this.projectCache.readProjects([this.projectCacheKey(project.path)]).get(
+            this.projectCacheKey(project.path)
+          );
         }
         if (hit && hit.inputHash === inputHash) {
           entries.set(project.path, hit);
@@ -636,6 +660,13 @@ export class TsReactIndexer {
           pending.delete(project.path);
           metrics.projects_cached++;
           metrics.diagnostics_cached += hit.files.length;
+          details.push({
+            project: this.projectCacheKey(project.path),
+            status: "cached",
+            files: hit.files.length,
+            diagnostics_cached: hit.files.length,
+            project_sig_hash: hit.projectSigHash,
+          });
           resolvedThisPass = true;
         } else {
           ready.push({ project, inputHash });
@@ -663,12 +694,20 @@ export class TsReactIndexer {
         signatures.set(item.project.path, entry.projectSigHash);
         pending.delete(item.project.path);
         writes.push(entry);
+        details.push({
+          project: this.projectCacheKey(item.project.path),
+          status: "rebuilt",
+          files: entry.files.length,
+          diagnostics_cached: 0,
+          project_sig_hash: entry.projectSigHash,
+        });
       }
     }
 
     this.projectCache.writeProjects(writes);
     this.projectEntryCache = new Map(entries);
-    return { entries, metrics };
+    details.sort((a, b) => a.project.localeCompare(b.project));
+    return { entries, metrics, details };
   }
 
   private buildProjectDependencies(dependencies: WorkspaceDependencyIndex): Map<string, Set<string>> {
@@ -720,13 +759,13 @@ export class TsReactIndexer {
     sourceHashes: Map<string, Array<[string, string]>>
   ): string {
     return sha256(stableStringify({
-      cacheVersion: 1,
-      projectPath: project.path,
+      cacheVersion: 2,
+      projectPath: this.projectCacheKey(project.path),
       files: sourceHashes.get(project.path) ?? [],
-      compilerOptions: project.options,
+      compilerOptions: this.normalizeCacheValue(project.options),
       typescriptVersion: ts.version,
       dependencyFingerprint: dependencies.fingerprint(project.path),
-      upstream: upstream.map((path) => [path, signatures.get(path) ?? ""]),
+      upstream: upstream.map((path) => [this.projectCacheKey(path), signatures.get(path) ?? ""]),
     }));
   }
 
@@ -741,13 +780,32 @@ export class TsReactIndexer {
       this.sourceHashCache.set(file, { size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs, hash });
       return hash;
     } catch {
-      return sha256(`missing:${file}`);
+      return sha256(`missing:${this.cacheFilePath(file)}`);
     }
   }
 
   private cacheFilePath(file: string): string {
     const relative = toPosix(path.relative(this.root, file));
     return relative.startsWith("..") ? file : relative;
+  }
+
+  private projectCacheKey(projectPath: string): string {
+    return this.cacheFilePath(projectPath);
+  }
+
+  private normalizeCacheValue(value: unknown): unknown {
+    if (typeof value === "string") {
+      return value === this.root || value.startsWith(`${this.root}${path.sep}`)
+        ? toPosix(path.relative(this.root, value))
+        : value;
+    }
+    if (Array.isArray(value)) return value.map((item) => this.normalizeCacheValue(item));
+    if (value && typeof value === "object") {
+      const normalized: Record<string, unknown> = {};
+      for (const [key, item] of Object.entries(value)) normalized[key] = this.normalizeCacheValue(item);
+      return normalized;
+    }
+    return value;
   }
 
   private computeProjectSigHash(symbols: Iterable<SymbolRecord>): string {
@@ -771,8 +829,8 @@ export class TsReactIndexer {
     if (result.symbols instanceof Map) {
       const accumulator = result as IndexAccumulator;
       return {
-        cacheVersion: 1,
-        projectPath,
+        cacheVersion: 2,
+        projectPath: this.projectCacheKey(projectPath),
         inputHash,
         projectSigHash: this.computeProjectSigHash(accumulator.symbols.values()),
         outputHash: this.computeProjectOutputHash(result),
@@ -788,8 +846,8 @@ export class TsReactIndexer {
     const serialized = result as SerializedProjectIndex;
     const symbols = new Map(serialized.symbols);
     return {
-      cacheVersion: 1,
-      projectPath,
+      cacheVersion: 2,
+      projectPath: this.projectCacheKey(projectPath),
       inputHash,
       projectSigHash: this.computeProjectSigHash(symbols.values()),
       outputHash: this.computeProjectOutputHash(result),

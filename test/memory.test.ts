@@ -4,8 +4,12 @@ import { calculateWorkerCount } from "../src/util/memory.js";
 const GB = 1024 ** 3;
 
 describe("memory-aware worker sizing", () => {
-  it("caps a 7 GB CI runner at four workers", () => {
-    expect(calculateWorkerCount(7 * GB, 56)).toBe(4);
+  it("reserves CI headroom across memory budgets", () => {
+    expect(calculateWorkerCount(4 * GB, 56)).toBe(1);
+    expect(calculateWorkerCount(7 * GB, 56)).toBe(2);
+    expect(calculateWorkerCount(8 * GB, 56)).toBe(3);
+    expect(calculateWorkerCount(16 * GB, 56)).toBe(7);
+    expect(calculateWorkerCount(32 * GB, 56)).toBe(8);
   });
 
   it("caps large hosts at eight workers", () => {

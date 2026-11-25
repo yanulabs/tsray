@@ -144,8 +144,8 @@ blocking; use `--allow-errors` for the same behavior in a single project. Errors
 test/story files become warnings and exit `0`. Use `--json` for machine-readable output.
 
 Full multi-project indexes use worker threads only for projects that miss the persistent cache.
-The default worker count is `clamp(1, 8, floor(availableMemoryGB / 1.5))`, including Linux cgroup
-limits and macOS/Windows headroom. `TSRAY_WORKERS` remains an explicit override.
+The default worker count is `clamp(1, 8, floor((availableMemoryGB - 1.5) / 2))`, including
+Linux cgroup limits and macOS/Windows headroom. `TSRAY_WORKERS` remains an explicit override.
 
 Each non-empty project persists its symbols, edges, imports, module stats, diagnostics, input
 fingerprint, and exported-API signature hash in the working SQLite database. Cache keys include
@@ -156,7 +156,9 @@ exported API changes cascade to affected dependents. Solution/aggregator configs
 files are reported as `projects_empty`. Use `tsray db rm <path>` to force a cold rebuild.
 
 JSON output and `project_info` expose `projects_total`, `projects_cached`, `projects_rebuilt`,
-`projects_empty`, `workers_spawned`, and `diagnostics_cached`.
+`projects_empty`, `workers_spawned`, and `diagnostics_cached`. The default `project_info` payload
+is a bounded summary with five one-line diagnostic samples per severity; pass `verbose: true`
+for full tsconfig metadata, per-project cache details, tools, storage metadata, and diagnostics.
 
 ### `export`
 
@@ -190,6 +192,11 @@ tsray diff origin/main . --format md
 
 Gates exit `1`; a missing repository or unresolvable ref exits `2`. Temporary worktrees are
 always removed.
+
+The base worktree read-only warm-seeds from the main checkout's working SQLite cache. Project
+fingerprints use repo-relative paths, so identical projects across worktrees share cache entries;
+the main checkout database is never modified. Set `TSRAY_DIFF_SEED=0` to force a cold diff, or
+`TSRAY_DIFF_PROFILE=1` to emit base/head project-cache metrics to stderr.
 
 ### `db`
 
@@ -377,7 +384,7 @@ claude mcp add --scope user tsray -- node /absolute/path/to/tsray/dist/cli/index
 
 | Tool | Purpose |
 | --- | --- |
-| `project_info` | Index readiness, project/tsconfig metadata, DB paths, counts, diagnostics |
+| `project_info` | Compact readiness, graph digest, counts, cache metrics, paths, and diagnostic samples; `verbose: true` for full metadata |
 | `get_codebase_map` | Module scorecard, cross-module edges, cycles, hotspots (`md`, `json`, `dot`, `mermaid`) |
 | `get_module_overview` | Module files, dependencies, hotspots, test reachability (`md`, `json`) |
 | `get_dependency_graph` | Module/file BFS with fan-in/fan-out ranking (`json`, `dot`, `mermaid`) |

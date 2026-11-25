@@ -78,7 +78,8 @@ export function calculateWorkerCount(
   if (override !== undefined && Number.isFinite(override) && override > 0) {
     return Math.max(1, Math.min(projectCount, Math.floor(override)));
   }
-  const memoryWorkers = Math.floor(Math.max(0, availableBytes) / (1.5 * GB));
+  const headroom = 1.5 * GB;
+  const memoryWorkers = Math.floor((Math.max(0, availableBytes) - headroom) / (2 * GB));
   return Math.max(1, Math.min(projectCount, 8, memoryWorkers));
 }
 

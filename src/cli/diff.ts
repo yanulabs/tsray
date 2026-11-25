@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import { TsReactIndexer } from "../index/indexer.js";
 import type { IndexerOptions } from "../index/indexer.js";
+import { ReadOnlyProjectCacheStore, resolveDbPaths } from "../cache/store.js";
 import { getDeadCode, getHotspots } from "../index/queries.js";
 import { toPosix } from "../util/paths.js";
 
@@ -40,7 +41,6 @@ export interface DiffResult {
   };
   head_prod_errors: number;
   base_prod_errors: number;
-  duration_ms: number;
 }
 
 export class GitDiffError extends Error {
@@ -90,15 +90,38 @@ export function runArchitecturalDiff(
   failOnGates: string[],
   indexerOptions: IndexerOptions = {}
 ): DiffResult {
-  const started = Date.now();
   const headIndexer = new TsReactIndexer(repoPath, indexerOptions);
-  const headSnapshot = headIndexer.buildIndex({ fullDiagnostics: true });
+  const seedPath = resolveDbPaths(headIndexer.root, headIndexer.projectId, process.env.TSRAY_DB).workingPath;
+  const seed = process.env.TSRAY_DIFF_SEED !== "0" && seedPath !== ":memory:"
+    ? new ReadOnlyProjectCacheStore(seedPath)
+    : null;
+  if (seed) headIndexer.setProjectCache(seed);
+  let headSnapshot: ReturnType<TsReactIndexer["buildIndex"]>;
+  try {
+    headSnapshot = headIndexer.buildIndex({ fullDiagnostics: true });
+  } catch (error) {
+    seed?.close();
+    throw error;
+  }
 
-  const gitTop = fs.realpathSync(git(headIndexer.root, ["rev-parse", "--show-toplevel"]));
-  const headSha = git(gitTop, ["rev-parse", "HEAD"]);
+  let gitTop: string;
+  let headSha: string;
+  try {
+    gitTop = fs.realpathSync(git(headIndexer.root, ["rev-parse", "--show-toplevel"]));
+    headSha = git(gitTop, ["rev-parse", "HEAD"]);
+  } catch (error) {
+    seed?.close();
+    throw error;
+  }
 
-  const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-diff-"));
-  fs.rmdirSync(temporary);
+  let temporary: string;
+  try {
+    temporary = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-diff-"));
+    fs.rmdirSync(temporary);
+  } catch (error) {
+    seed?.close();
+    throw error;
+  }
   let added = false;
   try {
     git(gitTop, ["worktree", "add", "--detach", temporary, baseRef]);
@@ -122,7 +145,16 @@ export function runArchitecturalDiff(
       if (!relativeConfig.startsWith("..")) baseOptions.tsconfig = relativeConfig;
     }
     const baseIndexer = new TsReactIndexer(baseTarget, baseOptions);
+    if (seed) baseIndexer.setProjectCache(seed);
     const baseSnapshot = baseIndexer.buildIndex({ fullDiagnostics: true });
+    if (process.env.TSRAY_DIFF_PROFILE === "1") {
+      process.stderr.write(`${JSON.stringify({
+        event: "tsray_diff_index",
+        seed: Boolean(seed),
+        base: baseSnapshot.projectMetrics,
+        head: headSnapshot.projectMetrics,
+      })}\n`);
+    }
 
     const baseCycleKeys = new Set(baseSnapshot.moduleCycles.map(cycleKey));
     const headCycleKeys = new Set(headSnapshot.moduleCycles.map(cycleKey));
@@ -232,9 +264,9 @@ export function runArchitecturalDiff(
       },
       head_prod_errors: headSnapshot.prodErrors.length,
       base_prod_errors: baseSnapshot.prodErrors.length,
-      duration_ms: Date.now() - started,
     };
   } finally {
+    seed?.close();
     if (added) {
       try {
         git(gitTop, ["worktree", "remove", "--force", temporary]);

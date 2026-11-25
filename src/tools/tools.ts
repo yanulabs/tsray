@@ -410,67 +410,82 @@ export function registerMcpTools(
 
   register(
     "project_info",
-    "Index state, project metadata, DB paths, symbol counts, and diagnostics.",
-    { compact: compactTrue, max_chars: maxCharsOptional },
+    "Compact index state, graph counts, cache metrics, storage paths, and diagnostic samples.",
+    { compact: compactTrue, verbose: z.boolean().default(false), max_chars: maxCharsOptional },
     async (args) => {
       const snapshot = await controller.getSnapshot();
       const status = controller.status();
       const compact = boolArg(args, "compact", true);
-      const diagnostics = {
-        prod_errors: snapshot.prodErrors.slice(0, 20),
-        warnings: snapshot.warnings.slice(0, 20),
-        current_prod_errors:
-          status.prod_errors > 0
-            ? controller.indexer.getLastSnapshot()?.prodErrors.slice(0, 20) ?? []
-            : [],
+      const verbose = boolArg(args, "verbose", false) || !compact;
+      const storage = store.getInfo();
+      const metrics = snapshot.projectMetrics ?? {
+        projects_total: 0,
+        projects_cached: 0,
+        projects_rebuilt: 0,
+        projects_empty: 0,
+        workers_spawned: 0,
+        diagnostics_cached: 0,
       };
+      const summary = {
+        project_id: snapshot.projectId,
+        projectId: snapshot.projectId,
+        root: snapshot.root,
+        index_state: status.index_state,
+        indexState: status.index_state,
+        indexed_at: snapshot.indexedAt,
+        indexedAt: snapshot.indexedAt,
+        duration_ms: snapshot.durationMs,
+        durationMs: snapshot.durationMs,
+        graph_digest: snapshot.graphDigest,
+        graphDigest: snapshot.graphDigest,
+        files: snapshot.filesCount,
+        symbols: snapshot.symbols.size,
+        edges: snapshot.edges.length,
+        modules: snapshot.modules.length,
+        module_cycles: snapshot.moduleCycles.length,
+        prod_errors_count: snapshot.prodErrors.length,
+        warnings_count: snapshot.warnings.length,
+        ...metrics,
+        prod_errors: snapshot.prodErrors.slice(0, 5).map((item) =>
+          `${item.file}:${item.line} TS${item.code} ${item.message}`.slice(0, 80)
+        ),
+        prod_errors_truncated: snapshot.prodErrors.length > 5,
+        warnings: snapshot.warnings.slice(0, 5).map((item) =>
+          `${item.file}:${item.line} TS${item.code} ${item.message}`.slice(0, 80)
+        ),
+        warnings_truncated: snapshot.warnings.length > 5,
+        db_path: storage.db_path,
+        summary_db_path: storage.summary_db_path,
+        summary_coverage_percent: store.getCoverage(snapshot).percent,
+      };
+      if (!verbose) return jsonResult(summary, numberArg(args, "max_chars", 20_000));
+
       return jsonResult(
-        compact
-          ? {
-              version: VERSION,
-              project_id: snapshot.projectId,
-              root: snapshot.root,
-              tsconfig_path: snapshot.tsconfigPath,
-              workspace: controller.indexer.workspace,
-              typescript_version: snapshot.typescriptVersion,
-              index_state: status,
-              indexed_at: snapshot.indexedAt,
-              duration_ms: snapshot.durationMs,
-              files: snapshot.filesCount,
-              modules: snapshot.modules.length,
-              symbols: snapshot.symbols.size,
-              edges: snapshot.edges.length,
-              ...(snapshot.projectMetrics ?? {}),
-              eligible: [...snapshot.symbols.values()].filter((symbol) => symbol.eligible).length,
-              summary_prompt_version: store.promptVersion,
-              tool_count: tools.length,
-              diagnostics,
-              storage: store.getInfo(),
-            }
-          : {
-              version: VERSION,
-              project_id: snapshot.projectId,
-              root: snapshot.root,
-              tsconfig_path: snapshot.tsconfigPath,
-              tsconfig_paths: snapshot.tsconfigPaths,
-              project_configs: snapshot.projectConfigs,
-              workspace: controller.indexer.workspace,
-              typescript_version: snapshot.typescriptVersion,
-              index_state: status,
-              indexed_at: snapshot.indexedAt,
-              duration_ms: snapshot.durationMs,
-              files: snapshot.filesCount,
-              modules: snapshot.modules.length,
-              symbols: snapshot.symbols.size,
-              edges: snapshot.edges.length,
-              ...(snapshot.projectMetrics ?? {}),
-              eligible: [...snapshot.symbols.values()].filter((symbol) => symbol.eligible).length,
-              summary_prompt_version: store.promptVersion,
-              tools: tools.slice(),
-              ...diagnostics,
-              storage: store.getInfo(),
-            },
-        numberArg(args, "max_chars", 20_000)
+        {
+          ...summary,
+          version: VERSION,
+          index_status: status,
+          tsconfig_path: snapshot.tsconfigPath,
+          tsconfig_paths: snapshot.tsconfigPaths,
+          project_configs: snapshot.projectConfigs,
+          projects: snapshot.projectDetails ?? [],
+          workspace: controller.indexer.workspace,
+          typescript_version: snapshot.typescriptVersion,
+          eligible: [...snapshot.symbols.values()].filter((symbol) => symbol.eligible).length,
+          summary_prompt_version: store.promptVersion,
+          tool_count: tools.length,
+          tools: tools.slice(),
+          diagnostics: {
+            prod_errors: snapshot.prodErrors,
+            warnings: snapshot.warnings,
+            current_prod_errors:
+              status.prod_errors > 0
+                ? controller.indexer.getLastSnapshot()?.prodErrors ?? []
+                : [],
+          },
+          storage,
+        },
+        numberArg(args, "max_chars", 200_000)
       );
     }
   );

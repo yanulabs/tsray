@@ -57,6 +57,7 @@ describe("MCP tool surface", () => {
         const tool = listed.tools.find((entry) => entry.name === name);
         expect(tool?.inputSchema.properties).toHaveProperty("output_chars");
       }
+      expect(listed.tools.find((entry) => entry.name === "project_info")?.inputSchema.properties).toHaveProperty("verbose");
 
       const info = await client.callTool({ name: "project_info", arguments: {} });
       expect(info.isError).toBeFalsy();
@@ -112,9 +113,26 @@ describe("MCP tool surface", () => {
     const { client, server, controller, store } = await connect();
     try {
       const info = await client.callTool({ name: "project_info", arguments: {} });
-      const infoJson = JSON.parse(textOf(info)) as { tool_count: number; tools?: string[] };
-      expect(infoJson.tool_count).toBeGreaterThanOrEqual(20);
+      const infoText = textOf(info);
+      const infoJson = JSON.parse(infoText) as {
+        graph_digest: string;
+        projects_total: number;
+        tools?: string[];
+        project_configs?: unknown[];
+        projects?: unknown[];
+      };
+      expect(infoText.length).toBeLessThan(2000);
+      expect(infoJson.graph_digest).toEqual(expect.any(String));
+      expect(infoJson.projects_total).toBe(1);
       expect(infoJson.tools).toBeUndefined();
+      expect(infoJson.project_configs).toBeUndefined();
+      expect(infoJson.projects).toBeUndefined();
+
+      const verbose = await client.callTool({ name: "project_info", arguments: { verbose: true } });
+      const verboseJson = JSON.parse(textOf(verbose)) as { tools: string[]; project_configs: unknown[]; projects: unknown[] };
+      expect(verboseJson.tools.length).toBeGreaterThanOrEqual(20);
+      expect(verboseJson.project_configs.length).toBeGreaterThan(0);
+      expect(verboseJson.projects.length).toBeGreaterThan(0);
 
       const first = await client.callTool({
         name: "lookup_symbol",

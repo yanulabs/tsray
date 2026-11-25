@@ -113,6 +113,14 @@ export interface DiagnosticWarning {
   isTest: boolean;
 }
 
+export interface ProjectIndexDetail {
+  project: string;
+  status: "cached" | "rebuilt" | "empty";
+  files: number;
+  diagnostics_cached: number;
+  project_sig_hash: string | null;
+}
+
 export interface ProjectIndexMetrics {
   projects_total: number;
   projects_cached: number;
@@ -123,7 +131,7 @@ export interface ProjectIndexMetrics {
 }
 
 export interface ProjectCacheEntry {
-  cacheVersion: 1;
+  cacheVersion: 2;
   projectPath: string;
   inputHash: string;
   projectSigHash: string;
@@ -198,6 +206,7 @@ export interface IndexSnapshot {
   /** Files whose diagnostics were served from the persistent workspace cache. */
   diagnosticsCached?: number;
   projectMetrics?: ProjectIndexMetrics;
+  projectDetails?: ProjectIndexDetail[];
   graphDigest?: string;
 }
 

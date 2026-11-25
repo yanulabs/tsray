@@ -5,6 +5,8 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterAll, describe, expect, it } from "vitest";
 import { diffMarkdown, runArchitecturalDiff } from "../src/cli/diff.js";
+import { TsReactIndexer } from "../src/index/indexer.js";
+import { DualCacheStore } from "../src/cache/store.js";
 
 const fixture = fileURLToPath(new URL("./fixtures/react-app", import.meta.url));
 const cleanup: string[] = [];
@@ -28,6 +30,44 @@ function git(repo: string, args: string[]): void {
 }
 
 describe("architectural diff", () => {
+  it("warm-seeds the base worktree without changing deterministic diff output", () => {
+    const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-diff-seed-test-"));
+    cleanup.push(repo);
+    fs.cpSync(fixture, repo, { recursive: true });
+    git(repo, ["init", "-q"]);
+    git(repo, ["add", "-A"]);
+    git(repo, ["commit", "-q", "-m", "base"]);
+
+    const database = path.join(repo, "cache.db");
+    const indexer = new TsReactIndexer(repo, { parallel: false });
+    const store = new DualCacheStore(indexer.root, indexer.projectId, { overrideDb: database });
+    indexer.setProjectCache(store);
+    try {
+      store.syncWorking(indexer.buildIndex({ fullDiagnostics: true }));
+    } finally {
+      store.close();
+    }
+    const before = fs.readFileSync(database);
+
+    const previousDb = process.env.TSRAY_DB;
+    const previousSeed = process.env.TSRAY_DIFF_SEED;
+    try {
+      process.env.TSRAY_DB = database;
+      process.env.TSRAY_DIFF_SEED = "0";
+      const cold = runArchitecturalDiff(repo, "HEAD", [], { parallel: false });
+      process.env.TSRAY_DIFF_SEED = "1";
+      const seeded = runArchitecturalDiff(repo, "HEAD", [], { parallel: false });
+      expect(JSON.stringify(seeded)).toBe(JSON.stringify(cold));
+      expect(fs.readFileSync(database)).toEqual(before);
+      expect(execFileSync("git", ["worktree", "list", "--porcelain"], { cwd: repo, encoding: "utf8" }).match(/^worktree /gm)).toHaveLength(1);
+    } finally {
+      if (previousDb === undefined) delete process.env.TSRAY_DB;
+      else process.env.TSRAY_DB = previousDb;
+      if (previousSeed === undefined) delete process.env.TSRAY_DIFF_SEED;
+      else process.env.TSRAY_DIFF_SEED = previousSeed;
+    }
+  }, 120_000);
+
   it("detects breaking API changes, new dead code, and gated regressions", () => {
     const repo = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-diff-test-"));
     cleanup.push(repo);
