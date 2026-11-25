@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import path from "node:path";
+import { execFileSync } from "node:child_process";
 import { parse as parseYaml } from "yaml";
 import { sha256, stableStringify } from "./hasher.js";
 import { toPosix } from "../util/paths.js";
@@ -107,6 +108,7 @@ export class WorkspaceDependencyIndex {
   private readonly packagesByName = new Map<string, string>();
   private readonly lock: { kind: "pnpm" | "npm" | "yarn"; data: Record<string, unknown> } | null;
   private readonly fingerprintCache = new Map<string, string>();
+  private readonly revisionCache = new Map<string, string | null>();
 
   constructor(private readonly root: string, projectPaths: string[]) {
     const directories = new Set<string>([root, ...projectPaths.map((file) => path.dirname(file))]);
@@ -158,8 +160,9 @@ export class WorkspaceDependencyIndex {
     const project = this.manifests.get(path.dirname(projectPath));
     if (!project) return [];
     const locals: LocalWorkspaceDependency[] = [];
+    const importer = this.importerKey(path.dirname(projectPath));
     for (const [name, specifier] of Object.entries(dependencySpecs(project.manifest))) {
-      const directory = this.packagesByName.get(name);
+      const directory = this.resolveLocalDirectory(name, specifier, importer);
       if (!directory) continue;
       const dependency = this.manifests.get(directory);
       if (!dependency || (specifier !== "workspace:*" && !specifier.startsWith("workspace:") && !specifier.startsWith("link:"))) {
@@ -168,6 +171,29 @@ export class WorkspaceDependencyIndex {
       locals.push({ name, directory, manifestHash: dependency.hash });
     }
     return locals.sort((a, b) => a.name.localeCompare(b.name));
+  }
+
+  projectRevision(projectPath: string): string | null {
+    let directory = path.dirname(projectPath);
+    while (directory !== this.root && directory.startsWith(this.root)) {
+      if (this.revisionCache.has(directory)) return this.revisionCache.get(directory) ?? null;
+      const gitPath = path.join(directory, ".git");
+      if (fs.existsSync(gitPath) && fs.statSync(gitPath).isFile()) {
+        try {
+          const revision = execFileSync("git", ["-C", directory, "rev-parse", "HEAD"], {
+            encoding: "utf8",
+            stdio: ["ignore", "pipe", "pipe"],
+          }).trim();
+          this.revisionCache.set(directory, revision);
+          return revision;
+        } catch {
+          this.revisionCache.set(directory, null);
+          return null;
+        }
+      }
+      directory = path.dirname(directory);
+    }
+    return null;
   }
 
   fingerprint(projectPath: string): string {
@@ -181,7 +207,7 @@ export class WorkspaceDependencyIndex {
       const key = `${name}@${specifier}@${versionHint ?? ""}@${importer}`;
       if (visited.has(key)) return;
       visited.add(key);
-      const localDirectory = this.packagesByName.get(name);
+      const localDirectory = this.resolveLocalDirectory(name, specifier, importer);
       if (localDirectory && (specifier.startsWith("workspace:") || specifier.startsWith("link:"))) {
         const local = this.manifests.get(localDirectory)!;
         const localHash = sha256(stableStringify(productionManifestPayload(local.manifest)));
@@ -225,6 +251,15 @@ export class WorkspaceDependencyIndex {
       const locked = this.lockedDirect(name, importer);
       visit(name, specifier, importer, locked?.version);
     }
+  }
+
+  private resolveLocalDirectory(name: string, specifier: string, importer: string): string | null {
+    const locked = this.lockedDirect(name, importer)?.version;
+    if (locked?.startsWith("link:")) {
+      const directory = importer === "." ? this.root : path.resolve(this.root, importer);
+      return path.resolve(directory, locked.slice("link:".length));
+    }
+    return this.packagesByName.get(name) ?? null;
   }
 
   private importerKey(directory: string): string {

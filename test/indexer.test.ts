@@ -119,6 +119,33 @@ describe("TypeScript/React indexer", () => {
     expect(getSymbolMatches(snapshot, "Button").map((candidate) => candidate.name)).toContain("Button");
   });
 
+  it("keeps graph digests stable across checkout locations for inferred import types", () => {
+    const roots = [
+      fs.mkdtempSync(path.join(os.tmpdir(), "tsray-stable-a-")),
+      fs.mkdtempSync(path.join(os.tmpdir(), "tsray-stable-b-")),
+    ];
+    cleanup.push(...roots);
+    for (const root of roots) {
+      fs.cpSync(fixture, root, { recursive: true });
+      fs.writeFileSync(path.join(root, "src/updates.ts"), "export const update = { version: 1 };\n");
+      fs.writeFileSync(
+        path.join(root, "src/dynamic.ts"),
+        'export async function loadUpdates() {\n  const updates = await import("./updates");\n  return { updates };\n}\n'
+      );
+    }
+
+    const snapshots = roots.map((root) =>
+      new TsReactIndexer(root, { parallel: false }).buildIndex({ fullDiagnostics: true })
+    );
+    const loadUpdates = snapshots.map((snapshot) =>
+      [...snapshot.symbols.values()].find((candidate) => candidate.name === "loadUpdates")!
+    );
+    expect(snapshots[0]?.graphDigest).toBe(snapshots[1]?.graphDigest);
+    expect(loadUpdates[0]?.signature).not.toContain(roots[0]!);
+    expect(loadUpdates[0]?.signature).not.toContain(roots[1]!);
+    expect(loadUpdates[0]?.signature).toBe(loadUpdates[1]?.signature);
+  });
+
   it("rebuilds incrementally after a file change and indexes new files", () => {
     const temporary = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-incremental-"));
     cleanup.push(temporary);

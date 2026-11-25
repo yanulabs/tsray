@@ -8,6 +8,17 @@ export function toPosix(value: string): string {
   return value.split(path.sep).join("/");
 }
 
+/** Removes checkout-specific absolute prefixes from TypeScript-rendered types. */
+export function canonicalizeTypeText(value: string, root: string): string {
+  const absolute = path.resolve(root);
+  const posixRoot = toPosix(absolute).replace(/\/+$/, "");
+  const nativeRoot = absolute.replace(/[\\/]+$/, "");
+  let result = value;
+  if (posixRoot) result = result.split(`${posixRoot}/`).join("");
+  if (nativeRoot) result = result.split(`${nativeRoot}${path.sep}`).join("");
+  return result;
+}
+
 export function isSourceFile(file: string): boolean {
   return /\.[cm]?[jt]sx?$/.test(file);
 }

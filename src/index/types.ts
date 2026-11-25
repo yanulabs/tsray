@@ -131,7 +131,7 @@ export interface ProjectIndexMetrics {
 }
 
 export interface ProjectCacheEntry {
-  cacheVersion: 2;
+  cacheVersion: 5;
   projectPath: string;
   inputHash: string;
   projectSigHash: string;

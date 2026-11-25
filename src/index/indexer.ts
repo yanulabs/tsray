@@ -24,6 +24,7 @@ import type {
   SymbolRecord,
 } from "./types.js";
 import {
+  canonicalizeTypeText,
   deriveModuleName,
   isEntrypointFile,
   isExcluded,
@@ -380,9 +381,9 @@ export class TsReactIndexer {
       getDefaultLibFileName: (options) => ts.getDefaultLibFilePath(options),
       fileExists: ts.sys.fileExists,
       readFile: ts.sys.readFile,
-      readDirectory: ts.sys.readDirectory,
+      readDirectory: (...args) => ts.sys.readDirectory(...args).sort(),
       directoryExists: ts.sys.directoryExists,
-      getDirectories: ts.sys.getDirectories,
+      getDirectories: (directory) => ts.sys.getDirectories(directory).sort(),
       useCaseSensitiveFileNames: () => ts.sys.useCaseSensitiveFileNames,
       getNewLine: () => ts.sys.newLine,
     };
@@ -567,8 +568,13 @@ export class TsReactIndexer {
       diagnosticsCached: metrics.diagnostics_cached,
       projectMetrics: metrics,
       projectDetails: details,
-      graphDigest: this.computeWorkspaceGraphDigest(
-        this.activeProjects.map((project) => entries.get(project.path)!)
+      graphDigest: this.computeSnapshotDigest(
+        symbols,
+        edges,
+        files,
+        fileImports,
+        moduleCycles,
+        moduleSet
       ),
     };
 
@@ -759,13 +765,18 @@ export class TsReactIndexer {
     sourceHashes: Map<string, Array<[string, string]>>
   ): string {
     return sha256(stableStringify({
-      cacheVersion: 2,
+      cacheVersion: 5,
       projectPath: this.projectCacheKey(project.path),
       files: sourceHashes.get(project.path) ?? [],
       compilerOptions: this.normalizeCacheValue(project.options),
       typescriptVersion: ts.version,
       dependencyFingerprint: dependencies.fingerprint(project.path),
-      upstream: upstream.map((path) => [this.projectCacheKey(path), signatures.get(path) ?? ""]),
+      projectRevision: dependencies.projectRevision(project.path),
+      upstream: upstream.map((path) => [
+        this.projectCacheKey(path),
+        signatures.get(path) ?? "",
+        dependencies.projectRevision(path),
+      ]),
     }));
   }
 
@@ -829,7 +840,7 @@ export class TsReactIndexer {
     if (result.symbols instanceof Map) {
       const accumulator = result as IndexAccumulator;
       return {
-        cacheVersion: 2,
+        cacheVersion: 5,
         projectPath: this.projectCacheKey(projectPath),
         inputHash,
         projectSigHash: this.computeProjectSigHash(accumulator.symbols.values()),
@@ -846,7 +857,7 @@ export class TsReactIndexer {
     const serialized = result as SerializedProjectIndex;
     const symbols = new Map(serialized.symbols);
     return {
-      cacheVersion: 2,
+      cacheVersion: 5,
       projectPath: this.projectCacheKey(projectPath),
       inputHash,
       projectSigHash: this.computeProjectSigHash(symbols.values()),
@@ -886,38 +897,54 @@ export class TsReactIndexer {
   }
 
   private computeProjectOutputHash(result: SerializedProjectIndex | IndexAccumulator): string {
+    const sort = <T>(items: T[], key: (item: T) => string): T[] =>
+      items.slice().sort((a, b) => key(a).localeCompare(key(b)));
     if (result.symbols instanceof Map) {
       const accumulator = result as IndexAccumulator;
       return sha256(JSON.stringify({
-        symbols: [...accumulator.symbols.values()],
-        edges: accumulator.edges,
-        fileImports: accumulator.fileImports,
-        files: [...accumulator.files.values()],
-        warnings: accumulator.warnings,
-        prodErrors: accumulator.prodErrors,
-        modules: [...accumulator.modules],
+        symbols: sort([...accumulator.symbols.values()], (symbol) => symbol.id),
+        edges: sort(accumulator.edges, (edge) => stableStringify(edge)),
+        fileImports: sort(accumulator.fileImports, (edge) => stableStringify(edge)),
+        files: sort([...accumulator.files.values()], (file) => file.path),
+        modules: sort([...accumulator.modules], (module) => module),
       }));
     }
     const serialized = result as SerializedProjectIndex;
     return sha256(JSON.stringify({
-      symbols: serialized.symbols.map(([, symbol]) => symbol),
-      edges: serialized.edges,
-      fileImports: serialized.fileImports,
-      files: serialized.files.map(([, file]) => file),
-      warnings: serialized.warnings,
-      prodErrors: serialized.prodErrors,
-      modules: serialized.modules,
+      symbols: sort(serialized.symbols.map(([, symbol]) => symbol), (symbol) => symbol.id),
+      edges: sort(serialized.edges, (edge) => stableStringify(edge)),
+      fileImports: sort(serialized.fileImports, (edge) => stableStringify(edge)),
+      files: sort(serialized.files.map(([, file]) => file), (file) => file.path),
+      modules: sort(serialized.modules, (module) => module),
     }));
   }
 
-  private computeWorkspaceGraphDigest(entries: ProjectCacheEntry[]): string {
+  private computeSnapshotDigest(
+    symbols: Map<string, SymbolRecord>,
+    edges: EdgeRecord[],
+    files: Map<string, FileRecord>,
+    fileImports: FileImportEdge[],
+    cycles: string[][],
+    modules: Set<string>
+  ): string {
     const hash = createHash("sha256");
-    for (const entry of entries) {
-      hash.update(entry.projectPath);
+    const add = (label: string, value: unknown): void => {
+      hash.update(label);
       hash.update("\0");
-      hash.update(entry.outputHash);
+      hash.update(JSON.stringify(value));
       hash.update("\n");
-    }
+    };
+    const canonical = <T>(items: T[], key: (item: T) => string): T[] =>
+      items
+        .map((item, index) => ({ item, index, key: key(item) }))
+        .sort((a, b) => a.key.localeCompare(b.key) || a.index - b.index)
+        .map((entry) => entry.item);
+    add("symbols", canonical([...symbols.values()], (symbol) => symbol.id));
+    add("edges", canonical(edges, (edge) => stableStringify(edge)));
+    add("files", canonical([...files.values()], (file) => file.path));
+    add("imports", canonical(fileImports, (edge) => stableStringify(edge)));
+    add("cycles", canonical(cycles, (cycle) => stableStringify(cycle)));
+    add("modules", [...modules].sort());
     return hash.digest("hex");
   }
 
@@ -1124,6 +1151,13 @@ export class TsReactIndexer {
       (fileName) => (ts.sys.useCaseSensitiveFileNames ? fileName : fileName.toLowerCase()),
       project.options
     );
+    const moduleResolutionHost: ts.ModuleResolutionHost = {
+      fileExists: ts.sys.fileExists,
+      readFile: ts.sys.readFile,
+      directoryExists: ts.sys.directoryExists,
+      getDirectories: (directory) => ts.sys.getDirectories(directory).sort(),
+      realpath: ts.sys.realpath,
+    };
     const ownedFiles = new Set(project.ownedFiles);
     const sourceFiles = project.ownedFiles
       .map((file) => program.getSourceFile(file))
@@ -1263,11 +1297,14 @@ export class TsReactIndexer {
       const id = container
         ? `sym:${relative}:${container}#${name}`
         : `sym:${relative}#${name}`;
+      const stableSignature = canonicalizeTypeText(signature, this.root);
+      const stablePropsType = propsType === null ? null : canonicalizeTypeText(propsType, this.root);
+      const stableHashSignature = canonicalizeTypeText(hashSignature, this.root);
       const start = sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile));
       const end = sourceFile.getLineAndCharacterOfPosition(node.getEnd());
       const directive = getFileDirective(sourceFile);
       const normalized = normalizeNodeText(node, sourceFile);
-      const { sigHash, selfHash } = computeDirectHashes(hashSignature, normalized, directive);
+      const { sigHash, selfHash } = computeDirectHashes(stableHashSignature, normalized, directive);
       const existing = symbols.get(id);
       const hasBody = isNodeWithBody(node);
 
@@ -1303,8 +1340,8 @@ export class TsReactIndexer {
         complexity: ["component", "hook", "function", "method"].includes(kind)
           ? computeComplexity(node)
           : 1,
-        propsType,
-        signature,
+        propsType: stablePropsType,
+        signature: stableSignature,
         doc: extractDoc(node, sourceFile),
         sigHash,
         selfHash,
@@ -1583,7 +1620,7 @@ export class TsReactIndexer {
         specifier,
         sourceFile.fileName,
         project.options,
-        ts.sys,
+        moduleResolutionHost,
         moduleResolutionCache
       ).resolvedModule;
       if (!resolved) return null;

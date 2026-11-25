@@ -434,7 +434,7 @@ export class DualCacheStore implements DiagnosticCacheProvider, ProjectCacheProv
       try {
         const entry = JSON.parse(row.payload_json) as ProjectCacheEntry;
         if (
-          entry.cacheVersion !== 2 ||
+          entry.cacheVersion !== 5 ||
           entry.projectPath !== row.project_path ||
           entry.inputHash !== row.input_hash ||
           entry.projectSigHash !== row.project_sig_hash ||
@@ -1077,7 +1077,7 @@ export class ReadOnlyProjectCacheStore implements ProjectCacheProvider {
         if (!row) continue;
         const entry = JSON.parse(row.payload_json) as ProjectCacheEntry;
         if (
-          entry.cacheVersion !== 2 ||
+          entry.cacheVersion !== 5 ||
           entry.projectPath !== row.project_path ||
           entry.inputHash !== row.input_hash ||
           entry.projectSigHash !== row.project_sig_hash ||

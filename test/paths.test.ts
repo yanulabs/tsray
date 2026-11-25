@@ -2,7 +2,7 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { afterAll, describe, expect, it } from "vitest";
-import { isEntrypointFile, loadConfig, readPackageEntrypoints, resolveProject } from "../src/util/paths.js";
+import { canonicalizeTypeText, isEntrypointFile, loadConfig, readPackageEntrypoints, resolveProject } from "../src/util/paths.js";
 
 const cleanup: string[] = [];
 
@@ -11,6 +11,14 @@ afterAll(() => {
 });
 
 describe("project metadata", () => {
+  it("canonicalizes checkout-specific paths in rendered TypeScript types", () => {
+    const root = path.join(os.tmpdir(), "tsray-type-root");
+    const rendered = `(): Promise<{ updates: typeof import("${path.join(root, "src/pwa/updates")}") }>`;
+    expect(canonicalizeTypeText(rendered, root)).toBe(
+      '(): Promise<{ updates: typeof import("src/pwa/updates") }>'
+    );
+  });
+
   it("maps package exports from dist back to src entrypoints", () => {
     const root = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-entry-"));
     cleanup.push(root);

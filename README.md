@@ -158,7 +158,8 @@ files are reported as `projects_empty`. Use `tsray db rm <path>` to force a cold
 JSON output and `project_info` expose `projects_total`, `projects_cached`, `projects_rebuilt`,
 `projects_empty`, `workers_spawned`, and `diagnostics_cached`. The default `project_info` payload
 is a bounded summary with five one-line diagnostic samples per severity; pass `verbose: true`
-for full tsconfig metadata, per-project cache details, tools, storage metadata, and diagnostics.
+for paginated project/config details, storage metadata, and bounded diagnostic objects.
+`project_filter`, `limit`, and `offset` control the verbose project page.
 
 ### `export`
 
@@ -193,10 +194,14 @@ tsray diff origin/main . --format md
 Gates exit `1`; a missing repository or unresolvable ref exits `2`. Temporary worktrees are
 always removed.
 
-The base worktree read-only warm-seeds from the main checkout's working SQLite cache. Project
-fingerprints use repo-relative paths, so identical projects across worktrees share cache entries;
-the main checkout database is never modified. Set `TSRAY_DIFF_SEED=0` to force a cold diff, or
-`TSRAY_DIFF_PROFILE=1` to emit base/head project-cache metrics to stderr.
+The base worktree initializes and checks out gitlinked submodules at `base-ref`, mirrors same-commit
+generated outputs and nested `node_modules` from the main checkout, and refuses to continue if
+tracked tsconfig discovery is incomplete. It read-only warm-seeds from the main checkout's working
+SQLite cache. Project fingerprints use repo-relative paths and containing submodule revisions, so
+identical projects across worktrees share cache entries without reusing changed-submodule results;
+the main checkout database is never modified. JSON includes explicit `base`/`head` project, file,
+symbol, edge, and graph-digest summaries. Set `TSRAY_DIFF_SEED=0` to force a cold diff, or `TSRAY_DIFF_PROFILE=1`
+to emit detailed base/head cache and discovery metrics to stderr.
 
 ### `db`
 

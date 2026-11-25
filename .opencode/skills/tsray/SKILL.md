@@ -59,14 +59,16 @@ Anti-patterns:
      healthy snapshot on disk; test-only errors are warnings.
 
 `project_info` also reports tsconfig paths, workspace mode, TypeScript version, DB paths,
-summary prompt version, and diagnostics. Compact mode returns `tool_count`; use
-`compact: false` when the registered tool-name list is needed.
+summary prompt version, and diagnostics. The default payload is compact. Use `verbose: true`
+(or `compact: false`) for paginated project/config details; `project_filter`, `limit`, and
+`offset` control the page. Verbose responses are capped at 12,000 characters and return
+`tool_count` rather than the registered tool-name list.
 
 ## Tool catalog
 
 | Tool | Parameters |
 |---|---|
-| `project_info` | `compact` (default true), `max_chars`. Readiness, counts, tsconfig paths, DB paths, diagnostics. |
+| `project_info` | `compact` (default true), `verbose`, `project_filter`, `limit` (default 20), `offset`, `max_chars`. Readiness, counts, DB paths, diagnostics; verbose mode paginates projects. |
 | `get_codebase_map` | `format` (`md` default, `json`, `dot`, `mermaid`), `top_modules` (`0` = all), `offset`, `edge_limit`, `edge_offset`, `sort_by`, `detail`, `summary_only`, `max_chars`. |
 | `get_module_overview` | `module` (required), `format`, `file_limit`, `file_offset`, `dependency_limit`, `dependency_offset`, `compact`, `max_chars`. |
 | `get_dependency_graph` | `format`, `scope`, `root`, `depth`, `direction`, `max_nodes`, `node_offset`, `max_edges`, `edge_offset`, `rank_limit`, `max_chars`. |
