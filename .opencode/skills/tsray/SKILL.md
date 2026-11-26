@@ -1,6 +1,6 @@
 ---
 name: tsray
-description: Deterministic TypeScript/React semantic code intelligence via the TypeScript Compiler API. Use for TypeScript/React codebase navigation, architecture overview, symbol lookup, references, callers, React render/component/context graphs, interface implementations, change impact, untested complexity hotspots, dead code, test/typecheck/lint execution, and structured summary caching. Strictly takes precedence over semantic/vector search (cocoindex-code / ccc) and grep for any known TypeScript symbol or React structure when the tsray MCP server is connected.
+description: Deterministic TypeScript/React semantic code intelligence via the TypeScript Compiler API. Use for TypeScript/React codebase navigation, architecture overview, symbol lookup, references, callers, React render/component/context graphs, interface implementations, change impact, untested complexity hotspots, dead code, test/typecheck/lint execution, and structured summary caching. Prefer these tools for known TypeScript symbols and React structures when the tsray MCP server is connected.
 ---
 
 # tsray
@@ -8,30 +8,30 @@ description: Deterministic TypeScript/React semantic code intelligence via the T
 In OpenCode, tools are named `tsray_<tool>` directly or live under `tools.tsray.*` in Code
 Mode.
 
-## Tool routing & precedence (overrides `ccc` / `cocoindex-code` and `grep`)
+## Tool routing
 
-1. **NEVER use vector/embedding search for a known TypeScript identifier** (component, hook,
-   context, function, method, class, interface, type, enum, variable). Vector search is
-   probabilistic and misses type aliases, barrel re-exports, and interface implementations;
-   `tsray` is compiler-exact (`ts.LanguageService` + `ts.TypeChecker`).
-2. **NEVER search to discover the project's module architecture or tsray tool names.** Call
-   `tsray` tools directly from the list below.
-3. **Use `ccc`/vector search only for:**
-   - non-TypeScript files (SQL, YAML, Dockerfiles, Markdown, configs, Go, Rust);
-   - conceptual discovery when you do not know any symbol name yet. Switch to `tsray` as
-     soon as you have one.
-4. **Use `rg` / direct file reads for:** literal strings, comments, error text, JSX copy, or
-   exact lines immediately before editing.
+1. **Prefer `tsray` for a known TypeScript identifier** (component, hook, context, function,
+   method, class, interface, type, enum, variable). Vector search is probabilistic and can miss
+   type aliases, barrel re-exports, and interface implementations; `tsray` is compiler-exact
+   (`ts.LanguageService` + `ts.TypeChecker`).
+2. **Use `get_codebase_map` or `get_module_overview` for project architecture.** The tool catalog
+   below is the authoritative list of available tools.
+3. **Use full-text search for non-TypeScript files** (SQL, YAML, Dockerfiles, Markdown, configs,
+   Go, Rust) and conceptual discovery when no symbol name is known. Switch to `tsray` as soon as
+   a TypeScript identifier is available.
+4. **Use `rg` or direct file reads for literal strings, comments, error text, JSX copy, and exact
+   lines immediately before editing.**
+5. Respect explicit user instructions about tool selection; these defaults are not a prohibition
+   on other search methods.
 
-Anti-patterns:
+Examples:
 
-- **WRONG:** `ccc.search(query="Button component render tree")`
-  **RIGHT:** `lookup_symbol(query="Button")` + `get_component_tree(symbol_id=...)`
-- **WRONG:** `rg "ThemeContext"` to find consumers
-  **RIGHT:** `get_references(symbol_id="sym:src/theme.tsx#ThemeContext")` +
-  `get_impact_analysis(symbol_id=...)`
-- **WRONG:** `rg "export .* from './Button'"` to understand a barrel
-  **RIGHT:** `explain_dependency(from="components", to="root")` and `get_dependency_graph`.
+- To inspect a component tree, use `lookup_symbol(query="Button")` followed by
+  `get_component_tree(symbol_id=...)`.
+- To find consumers of a context, use
+  `get_references(symbol_id="sym:src/theme.tsx#ThemeContext")` and `get_impact_analysis(symbol_id=...)`.
+- To explain a barrel dependency, use `explain_dependency(from="components", to="root")` and
+  `get_dependency_graph`.
 
 ## Connection check
 
@@ -40,8 +40,8 @@ Anti-patterns:
 
    ```sh
    npm run build
-   tsray install-mcp --target opencode --yes
-   tsray install-skill --target opencode --yes
+   node dist/cli/index.js install-mcp --target opencode --yes
+   node dist/cli/index.js install-skill --target opencode --yes
    opencode mcp list
    ```
 
@@ -200,7 +200,8 @@ The server never generates prose. The client generates summaries.
 - Prefer `tsray` over shell tools for TypeScript/React structure; use shell tools for
   formatting, running arbitrary commands, and non-code files.
 - Use `run_tests`, `run_typecheck`, and `run_lint` when available; they respect the project's
-  package manager and scripts.
+  package manager and scripts. These tools execute code and must only be used with trusted
+  repositories and configurations.
 - Prefer automatic incremental rebuilds. Call `reindex` after a branch switch or dependency
   upgrade.
 - Generate the offline report with:

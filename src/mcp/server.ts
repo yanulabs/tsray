@@ -1,5 +1,6 @@
 import fs from "node:fs";
 import http from "node:http";
+import os from "node:os";
 import path from "node:path";
 import { spawn } from "node:child_process";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
@@ -100,6 +101,91 @@ function isLoopback(host: string): boolean {
   return host === "127.0.0.1" || host === "localhost" || host === "::1" || host === "[::1]";
 }
 
+function normalizeHostname(hostname: string): string {
+  return hostname.replace(/^\[|\]$/g, "").toLowerCase();
+}
+
+export type ReportRequestValidation =
+  | { ok: true; url: URL }
+  | { ok: false; status: 400 | 403 | 405; error: "bad_request" | "forbidden" | "method_not_allowed" };
+
+export function validateReportRequest(
+  request: Pick<http.IncomingMessage, "method" | "headers" | "url">,
+  bindHost: string,
+  port: number
+): ReportRequestValidation {
+  const reject = (
+    status: 400 | 403 | 405,
+    error: "bad_request" | "forbidden" | "method_not_allowed"
+  ): ReportRequestValidation => ({ ok: false, status, error });
+
+  if (request.method !== "GET" && request.method !== "HEAD") {
+    return reject(405, "method_not_allowed");
+  }
+
+  const hostHeader = request.headers.host;
+  if (!hostHeader) return reject(403, "forbidden");
+
+  let host: URL;
+  try {
+    host = new URL(`http://${hostHeader}`);
+  } catch {
+    return reject(403, "forbidden");
+  }
+  if (
+    host.protocol !== "http:" ||
+    host.username ||
+    host.password ||
+    host.pathname !== "/" ||
+    host.search ||
+    host.hash
+  ) {
+    return reject(403, "forbidden");
+  }
+
+  const hostname = normalizeHostname(host.hostname);
+  const normalizedBindHost = normalizeHostname(bindHost);
+  const allowedHostnames = new Set([normalizedBindHost]);
+  if (isLoopback(bindHost) || normalizedBindHost === "0.0.0.0" || normalizedBindHost === "::") {
+    allowedHostnames.add("127.0.0.1");
+    allowedHostnames.add("localhost");
+    allowedHostnames.add("::1");
+  }
+  if (normalizedBindHost === "0.0.0.0" || normalizedBindHost === "::") {
+    for (const addresses of Object.values(os.networkInterfaces())) {
+      for (const address of addresses ?? []) {
+        if (!address.internal) allowedHostnames.add(normalizeHostname(address.address));
+      }
+    }
+  }
+  if (!allowedHostnames.has(hostname) || Number(host.port || "80") !== port) {
+    return reject(403, "forbidden");
+  }
+
+  const origin = request.headers.origin;
+  if (origin !== undefined) {
+    let originUrl: URL;
+    try {
+      originUrl = new URL(origin);
+    } catch {
+      return reject(403, "forbidden");
+    }
+    if (originUrl.protocol !== "http:" || originUrl.origin !== host.origin) {
+      return reject(403, "forbidden");
+    }
+  }
+
+  const target = request.url ?? "/";
+  if (!target.startsWith("/") || target.startsWith("//")) {
+    return reject(400, "bad_request");
+  }
+  try {
+    return { ok: true, url: new URL(target, "http://tsray.invalid") };
+  } catch {
+    return reject(400, "bad_request");
+  }
+}
+
 export async function startServe(
   controller: IndexController,
   store: DualCacheStore,
@@ -126,8 +212,22 @@ export async function startServe(
   }
 
   const httpServer = http.createServer(async (request, response) => {
+    response.setHeader("x-content-type-options", "nosniff");
+    response.setHeader("referrer-policy", "no-referrer");
     try {
-      const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
+      const address = httpServer.address();
+      const port = address && typeof address === "object" ? address.port : options.port;
+      const validation = validateReportRequest(request, options.host, port);
+      if (!validation.ok) {
+        response.writeHead(validation.status, {
+          "content-type": "application/json; charset=utf-8",
+          "cache-control": "no-store",
+          ...(validation.status === 405 ? { allow: "GET, HEAD" } : {}),
+        });
+        response.end(JSON.stringify({ error: validation.error }));
+        return;
+      }
+      const { url } = validation;
       if (url.pathname === "/api/report") {
         const snapshot = await controller.getSnapshot();
         const payload = buildReportPayload(snapshot, store);
@@ -182,8 +282,16 @@ export async function startServe(
       response.writeHead(404, { "content-type": "text/plain; charset=utf-8" });
       response.end("Not found\n");
     } catch (error) {
-      response.writeHead(500, { "content-type": "text/plain; charset=utf-8" });
-      response.end(error instanceof Error ? error.stack ?? error.message : String(error));
+      logError(`[tsray] report request error: ${error instanceof Error ? error.stack ?? error.message : String(error)}`);
+      if (response.headersSent) {
+        response.end();
+        return;
+      }
+      response.writeHead(500, {
+        "content-type": "text/plain; charset=utf-8",
+        "cache-control": "no-store",
+      });
+      response.end("Internal server error\n");
     }
   });
 

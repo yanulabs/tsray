@@ -2,6 +2,15 @@
 
 Semantic TypeScript/React indexer, MCP stdio server, and offline architecture reporter.
 
+## Project resources
+
+- [Architecture guide](docs/ARCHITECTURE.md)
+- [Contributing guide](CONTRIBUTING.md)
+- [Support](SUPPORT.md)
+- [Security policy](SECURITY.md)
+- [Changelog](CHANGELOG.md)
+- [Third-party notices](THIRD_PARTY_NOTICES.md)
+
 `tsray` loads a TypeScript project with `ts.LanguageService` + `ts.TypeChecker`, builds a
 line-independent semantic graph of symbols and React edges, caches content-addressed
 summaries in SQLite, and exposes the result over MCP, Markdown, DOT, Mermaid, JSON, and a
@@ -88,6 +97,12 @@ Commands:
   export <html|md|dot|mermaid|json> [path]
   diff [base-ref] [path]             Compare the working tree against a git ref
   db <path|info|rm|prune> [path]
+  install-mcp [targets]               Register the MCP server with supported clients
+  uninstall-mcp [targets]             Remove MCP registrations
+  mcp-status [targets]                Inspect MCP registrations
+  install-skill [targets]             Install the bundled agent skill
+  uninstall-skill [targets]           Remove installed skills
+  skill-status [targets]              Inspect skill installations
   version
   help
 ```
@@ -102,7 +117,8 @@ tsray serve [path] [--db <path>] [--host <addr>] [--port <n>] \
 
 - `--db <path>` — single-database override; env `TSRAY_DB`; `:memory:` is supported.
 - `--host` — bind address (default `127.0.0.1`). Binding beyond loopback prints a warning.
-  The report API has no authentication; keep it on loopback unless you trust the network.
+  Loopback requests validate `Host` and `Origin` headers against DNS rebinding. The report API has
+  no authentication; keep it on loopback unless you trust the network.
 - `--port` — preferred report port (default `4321`; env `TSRAY_PORT`; `0` = OS-assigned).
 - `--port-range` — fallback window after the preferred port (default `100`).
 - `--strict-port` — fail instead of moving when the preferred port is busy.
@@ -196,7 +212,8 @@ always removed.
 
 The base worktree initializes and checks out gitlinked submodules at `base-ref`, mirrors same-commit
 generated outputs and nested `node_modules` from the main checkout, and refuses to continue if
-tracked tsconfig discovery is incomplete. It read-only warm-seeds from the main checkout's working
+tracked tsconfig discovery is incomplete. Only run architectural diffs against repositories and
+submodules you trust. It read-only warm-seeds from the main checkout's working
 SQLite cache. Project fingerprints use repo-relative paths and containing submodule revisions, so
 identical projects across worktrees share cache entries without reusing changed-submodule results;
 the main checkout database is never modified. JSON includes explicit `base`/`head` project, file,
@@ -230,7 +247,13 @@ make install          # npm link; exposes `tsray` on PATH
 tsray version
 ```
 
-For a regular global install instead of a development link:
+After a release is published on npm:
+
+```sh
+npm install --global tsray
+```
+
+For a regular global install from a local checkout instead of a development link:
 
 ```sh
 npm install --global /absolute/path/to/tsray
@@ -645,8 +668,8 @@ Static exports work from `file://`; live mode polls `/api/report` every 5 second
 
 `runner.*` takes precedence over package scripts. Otherwise `run_tests` detects a `test`
 script containing vitest/jest, then local vitest/jest; `run_typecheck` uses
-`typecheck`/`type-check`/`build`, then local `tsc --noEmit`; `run_lint` uses a `lint` script,
-then biome or eslint configs.
+`typecheck`/`type-check`, then local `tsc --noEmit`; `run_lint` uses a `lint` script, then biome
+or eslint configs.
 
 ## Environment variables
 
@@ -719,8 +742,19 @@ scripts/      report embedding and executable post-build step
   `implements` checks; review `via: "structural"` edges when they appear noisy.
 - Sources are indexed, not bundled. Runtime-only dynamic imports and non-literal module
   specifiers are not resolved.
-- `tsray` does not execute or evaluate code.
+- The indexer does not execute analyzed project code. Optional MCP command tools execute package
+  scripts or configured commands and must only be used with trusted repositories.
+
+## Community and support
+
+See [SUPPORT.md](SUPPORT.md) for support channels and [CONTRIBUTING.md](CONTRIBUTING.md) for
+development and review expectations. Participation is governed by the
+[Contributor Covenant Code of Conduct](CODE_OF_CONDUCT.md).
+
+Report security vulnerabilities privately as described in [SECURITY.md](SECURITY.md); do not open
+a public issue for a security problem.
 
 ## License
 
-MIT. See [LICENSE](LICENSE).
+MIT. See [LICENSE](LICENSE). Bundled report dependencies retain their own licenses; see
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) and the included texts in `licenses/`.

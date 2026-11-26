@@ -3,6 +3,24 @@
   "version": "0.1.0",
   "description": "Semantic TypeScript/React indexer, MCP server, and offline architecture reporter",
   "license": "MIT",
+  "author": "Yanulabs",
+  "keywords": [
+    "typescript",
+    "react",
+    "mcp",
+    "static-analysis",
+    "semantic-analysis",
+    "code-graph",
+    "architecture"
+  ],
+  "homepage": "https://github.com/yanulabs/tsray#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/yanulabs/tsray.git"
+  },
+  "bugs": {
+    "url": "https://github.com/yanulabs/tsray/issues"
+  },
   "type": "module",
   "engines": {
     "node": ">=22.13.0"
@@ -15,8 +33,11 @@
     "web/dist/report.html",
     ".opencode/skills/tsray/SKILL.md",
     "README.md",
+    "CHANGELOG.md",
     "LICENSE",
-    "THIRD_PARTY_NOTICES.md"
+    "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
+    "licenses"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.json && node scripts/postbuild.mjs",
@@ -36,8 +57,9 @@
     "skill:status": "node dist/cli/index.js skill-status",
     "install:all": "npm run build && npm link && npm run install:skill && npm run install:mcp",
     "uninstall:all": "npm run uninstall:mcp && npm run uninstall:skill && npm uninstall --global tsray",
-    "prepublishOnly": "npm run verify && npm run build",
-    "pack:check": "npm pack --dry-run"
+    "prepublishOnly": "npm run verify",
+    "prepack": "npm run build",
+    "pack:check": "npm run build && node scripts/check-package.mjs"
   },
   "publishConfig": {
     "access": "public"
