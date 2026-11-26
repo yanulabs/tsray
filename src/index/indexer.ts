@@ -32,6 +32,7 @@ import {
   loadConfig,
   readPackageEntrypoints,
   resolveProject,
+  resolveReferencedTsconfig,
   toPosix,
 } from "../util/paths.js";
 import {
@@ -292,9 +293,12 @@ export class TsReactIndexer {
           .map(canonicalPath)
           .sort(),
         ownedFiles: [],
-        references: (result.projectReferences ?? []).map((reference) =>
-          canonicalPath(path.resolve(path.dirname(configPath), reference.path, "tsconfig.json"))
-        ),
+        references: (result.projectReferences ?? [])
+          .map((reference) =>
+            resolveReferencedTsconfig(path.resolve(path.dirname(configPath), reference.path))
+          )
+          .filter((reference): reference is string => reference !== null)
+          .map(canonicalPath),
       });
     }
 

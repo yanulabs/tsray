@@ -62,4 +62,38 @@ describe("project metadata", () => {
       project.tsconfigPaths.some((file) => file.endsWith(path.join("packages", "web", "tsconfig.json")))
     ).toBe(true);
   });
+
+  it("resolves solution-style references to config files and directories", () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "tsray-references-"));
+    cleanup.push(root);
+    fs.mkdirSync(path.join(root, "src"), { recursive: true });
+    fs.mkdirSync(path.join(root, "packages", "lib", "src"), { recursive: true });
+    fs.writeFileSync(path.join(root, "src", "main.ts"), "export const value = 1;\n");
+    fs.writeFileSync(
+      path.join(root, "packages", "lib", "src", "index.ts"),
+      "export const lib = 1;\n"
+    );
+    fs.writeFileSync(
+      path.join(root, "tsconfig.json"),
+      JSON.stringify({
+        files: [],
+        references: [{ path: "./tsconfig.app.json" }, { path: "./packages/lib" }],
+      })
+    );
+    fs.writeFileSync(
+      path.join(root, "tsconfig.app.json"),
+      JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] })
+    );
+    fs.writeFileSync(
+      path.join(root, "packages", "lib", "tsconfig.json"),
+      JSON.stringify({ compilerOptions: { strict: true }, include: ["src"] })
+    );
+
+    const project = resolveProject(root);
+    expect(project.tsconfigPaths).toHaveLength(3);
+    expect(project.tsconfigPaths.some((file) => file.endsWith("tsconfig.app.json"))).toBe(true);
+    expect(
+      project.tsconfigPaths.some((file) => file.endsWith(path.join("packages", "lib", "tsconfig.json")))
+    ).toBe(true);
+  });
 });

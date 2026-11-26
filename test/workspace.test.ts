@@ -1,3 +1,4 @@
+import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { TsReactIndexer } from "../src/index/indexer.js";
@@ -17,6 +18,15 @@ describe("workspace and project references", () => {
     expect(snapshot.tsconfigPaths).toContain("packages/ui/tsconfig.json");
     expect(snapshot.tsconfigPaths).toContain("tsconfig.json");
     expect(snapshot.modules.sort()).toEqual(["packages/app", "packages/ui"]);
+
+    const appProject = indexer
+      .getBootstrap()
+      .projects.find((project) => project.path.endsWith(path.join("packages", "app", "tsconfig.json")));
+    expect(
+      appProject?.references.some((reference) =>
+        reference.endsWith(path.join("packages", "ui", "tsconfig.json"))
+      )
+    ).toBe(true);
 
     const app = [...snapshot.symbols.values()].find((symbol) => symbol.name === "App");
     const button = [...snapshot.symbols.values()].find((symbol) => symbol.name === "Button");

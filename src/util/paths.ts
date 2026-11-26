@@ -105,6 +105,16 @@ function readPackageName(root: string): string | null {
   return typeof pkg?.name === "string" && pkg.name.trim() ? pkg.name.trim() : null;
 }
 
+export function resolveReferencedTsconfig(referencePath: string): string | null {
+  const resolved = path.resolve(referencePath);
+  if (!fs.existsSync(resolved)) return null;
+  const stat = fs.statSync(resolved);
+  if (stat.isFile()) return resolved;
+  if (!stat.isDirectory()) return null;
+  const config = path.join(resolved, "tsconfig.json");
+  return fs.existsSync(config) && fs.statSync(config).isFile() ? config : null;
+}
+
 function configReferences(configPath: string, seen: Set<string>): string[] {
   const resolved = path.resolve(configPath);
   if (seen.has(resolved)) return [];
@@ -114,10 +124,8 @@ function configReferences(configPath: string, seen: Set<string>): string[] {
   if (read.error || !read.config) return [];
   const parsed = ts.parseJsonConfigFileContent(read.config, ts.sys, path.dirname(resolved), undefined, resolved);
   const references = (parsed.projectReferences ?? [])
-    .map((reference) => path.resolve(reference.path))
-    .filter((reference) => fs.existsSync(reference) && fs.statSync(reference).isDirectory())
-    .map((reference) => path.join(reference, "tsconfig.json"))
-    .filter((reference) => fs.existsSync(reference));
+    .map((reference) => resolveReferencedTsconfig(reference.path))
+    .filter((reference): reference is string => reference !== null);
 
   const nested: string[] = [];
   for (const reference of references) {
