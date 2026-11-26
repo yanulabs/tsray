@@ -2,6 +2,8 @@
 
 ## Unreleased
 
+## 0.2.0 — 2026-11-26
+
 ### Added
 
 - Optional CSS/CSS Modules analysis with `css_diagnostics`, `css_impact`, `css_cascade`, and
@@ -22,8 +24,8 @@
   `tools.ts`, `queries.ts`, `store.ts`, `exporters.ts`, and `diff.ts` are now composition or
   re-export facades; registration, parsing, projections, SQL schemas, and shared helpers are
   reusable modules.
-- `version`, `--version`, and `-v` now print conventional Unix-style output (`tsray 0.1.0`)
-  instead of only the raw version number.
+- `version`, `--version`, and `-v` now print conventional Unix-style output
+  (`tsray <version>`) instead of only the raw version number.
 
 ## 0.1.0 — 2026-11-26
 
