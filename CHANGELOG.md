@@ -2,8 +2,26 @@
 
 ## Unreleased
 
+### Added
+
+- Optional CSS/CSS Modules analysis with `css_diagnostics`, `css_impact`, `css_cascade`, and
+  `css_runtime_check` MCP tools. Uses `css-tree` plus `lightningcss`, resolves `baseUrl`/`paths`
+  aliases, follows the TypeScript import graph for stylesheet order, and detects missing/unused
+  module classes, undefined or cyclic custom properties, inert declarations, duplicates, and
+  missing dependency imports. Playwright remains an optional peer dependency.
+- CSS hardening: partial Tailwind analysis, generated CSS opt-in (`include_generated`), global
+  dead-class audit (`audit_global_classes`), TypeChecker-resolved template classes, local
+  `className` variables, helper transforms, `classList`/`setAttribute` usage, escaped class
+  identifiers, and subject-aware cascade matching.
+
 ### Changed
 
+- Split every oversized orchestration file into domain modules with stable facades:
+  `tools/domains`, `index/queries`, `index/indexer`, `cache/store`, `render/exporters`,
+  `cli/commands`, `cli/diff`, and `css/analysis` + `css/tsx`. Entry files such as
+  `tools.ts`, `queries.ts`, `store.ts`, `exporters.ts`, and `diff.ts` are now composition or
+  re-export facades; registration, parsing, projections, SQL schemas, and shared helpers are
+  reusable modules.
 - `version`, `--version`, and `-v` now print conventional Unix-style output (`tsray 0.1.0`)
   instead of only the raw version number.
 

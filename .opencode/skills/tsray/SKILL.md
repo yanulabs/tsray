@@ -90,6 +90,10 @@ summary prompt version, and diagnostics. The default payload is compact. Use `ve
 | `run_tests` | `timeout_seconds`, `output_chars`, `max_chars`. |
 | `run_typecheck` | `timeout_seconds`, `output_chars`, `max_chars`. |
 | `run_lint` | `timeout_seconds`, `output_chars`, `max_chars`. |
+| `css_diagnostics` | `extra_css_files`, `include_generated` (default false), `audit_global_classes` (default false), `max_chars`. |
+| `css_impact` | `symbol` (required), `extra_css_files`, `include_generated`, `max_chars`. |
+| `css_cascade` | `selector_query` (required), `property`, `extra_css_files`, `include_generated`, `max_chars`. |
+| `css_runtime_check` | `url` (required), `viewports` optional, `max_chars`. Needs optional Playwright. |
 | `reindex` | `full_diagnostics` (default true), `max_chars`. |
 
 JSON fields are snake_case. Symbol arguments accept either `symbol_id` or `symbolId`.
@@ -106,6 +110,26 @@ JSON fields are snake_case. Symbol arguments accept either `symbol_id` or `symbo
 - `run_tests`, `run_typecheck`, and `run_lint` keep the head and tail of each output stream;
   bound each stream with `output_chars`.
 - Do not request `compact: false` unless the omitted metadata is needed.
+
+## CSS analysis
+
+Use `css_diagnostics` after changing styles or CSS Modules. It parses imported `.css` files with
+`css-tree`, validates values with `lightningcss` and the css-tree grammar, and cross-checks
+TypeScript `className` bindings against module exports. Preprocessors (`.scss`, `.sass`, `.less`,
+`.styl`) are reported as skipped rather than parsed as CSS. Automatically discovered CSS under
+`node_modules`, `dist`/`build`/`out`, and generated directories is skipped by default; pass a
+compiled output through `extra_css_files` to analyze it explicitly.
+
+- Use `css_impact` with `--token`, `.class`, or `#id` before renaming or deleting styles.
+- Use `css_cascade` with a selector fragment such as `.card` to see why a property wins across
+  `!important`, `@layer`, specificity, and source order. The query matches the selector subject
+  (rightmost compound), so `.parent .card` participates but `.card .child` does not.
+- For Tailwind or CSS-in-JS projects, pass compiled CSS with `extra_css_files` or set
+  `include_generated: true` to analyze imported build output, or use `css_runtime_check`
+  against a running URL. Playwright stays optional and is lazy-loaded.
+- Use `audit_global_classes: true` to find plain CSS classes without a statically resolved
+  `className` binding. Treat results as warnings: dynamic runtime classes, external widgets,
+  and selectors used only in `querySelector` strings can still be intentional.
 
 ## Canonical IDs
 

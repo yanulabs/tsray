@@ -434,10 +434,36 @@ claude mcp add --scope user tsray -- node /absolute/path/to/tsray/dist/cli/index
 | `run_tests` | Run the project's test runner (package script, vitest, or jest) |
 | `run_typecheck` | Run `tsc --noEmit` or the configured typecheck script |
 | `run_lint` | Run the configured linter, eslint, or biome |
+| `css_diagnostics` | Static CSS/CSS Modules analysis: syntax and value errors, custom-property cycles, inert declarations, duplicates, missing/unused module classes, and opt-in global-class audit |
+| `css_impact` | Definitions, consumers, rules, and components impacted by a custom property, class, or ID |
+| `css_cascade` | Cascade Level 5 resolution for a selector's subject across `!important`, `@layer`, specificity, and source order |
+| `css_runtime_check` | Optional Playwright layout invariants (overflow, clipping, collapsed or obscured controls) |
 | `reindex` | Force a full synchronous rebuild and working DB sync |
 
 Symbol arguments accept `symbol_id` (canonical ID or exact name) or the camelCase
 `symbolId` alias. JSON results use snake_case fields for parity with `goray`.
+
+CSS analysis is on demand and does not change the TypeScript snapshot. It parses imported
+`.css` files with `css-tree`, validates them with `lightningcss` plus the css-tree property
+grammar, and uses the owning project's TypeChecker to resolve CSS Module imports, string
+aliases, template literals, conditional classes, and computed class keys. `.scss`, `.sass`,
+`.less`, and `.styl` sources are reported as skipped; analyze their compiled CSS instead.
+Automatically discovered CSS under `node_modules`, `dist`/`build`/`out`, and generated
+directories is also skipped by default; list a compiled output explicitly in
+`extra_css_files` when it is the only available stylesheet. Tailwind files are listed separately in `css_diagnostics.tailwind_files`; their plain
+rules and `@theme` tokens are analyzed, while generated utilities require compiled CSS or
+`css_runtime_check`. CSS-in-JS projects should also use compiled CSS or the runtime check. That tool is lazy-loaded and requires the optional `playwright` peer
+dependency plus a Chromium browser (`npx playwright install chromium`).
+
+Stylesheet order follows the TypeScript import graph from root modules, so `@layer`
+statements keep the order in which the application evaluates its CSS imports.
+
+`css_diagnostics` accepts `include_generated: true` to analyze compiled/dist CSS and
+`audit_global_classes: true` to report plain CSS classes that have no statically resolved
+`className` binding. The global audit understands `clsx`/`cn`-style helpers, template-literal
+prefixes, `classList.add/remove/toggle`, `setAttribute("class", ...)`, and DOM `className`
+assignments, but remains a warning-level heuristic because runtime code can apply arbitrary
+classes.
 
 ### Agent response controls
 
@@ -719,11 +745,13 @@ The report template is embedded, so the binary needs no runtime web files.
 src/
   cli/        command routing, git worktree diff, MCP/skill integration
   integration/ atomic JSON/TOML client config editing, detection, skill install
-  index/      types, hashing, TypeScript/React indexer, queries, watcher
-  cache/      dual SQLite store, summary schemas
-  render/     payload, Markdown/DOT/Mermaid/HTML exporters, embedded template
+  index/      indexer/ (orchestration, project pass, cache hashing, symbol utils), queries/ (graph, modules, symbols, audit, impact), watcher
+  css/        analysis/ (AST walker, rule builder), tsx/ (imports, expressions), cascade, diagnostics, runtime checks
+  cache/      store/ (working DB, summary DB, schemas, paths, read-only cache)
+  render/     exporters/ (payload, Markdown, graph, JSON, HTML), embedded template
   mcp/        stdio server + local HTTP report server
-  tools/      MCP tool registry and test/lint runner detection
+  tools/      composition root, domain/ tool modules, shared/ argument/result/projection helpers, runner detection
+  cli/        command dispatch, commands/ handlers, diff/ worktree and rendering
   util/       paths, globs, source utilities
 web/          React 19 + Tailwind 4 report UI (Vite single-file build)
 test/         vitest suites and the React fixture
@@ -742,6 +770,10 @@ scripts/      report embedding and executable post-build step
   `implements` checks; review `via: "structural"` edges when they appear noisy.
 - Sources are indexed, not bundled. Runtime-only dynamic imports and non-literal module
   specifiers are not resolved.
+- CSS analysis covers standard CSS and CSS Modules. Preprocessors are skipped, and Tailwind or
+  CSS-in-JS source files are not statically modeled; use compiled CSS or the Playwright runtime
+  check for those projects. Media queries and state selectors are reported, but cascade
+  resolution assumes their conditions match.
 - The indexer does not execute analyzed project code. Optional MCP command tools execute package
   scripts or configured commands and must only be used with trusted repositories.
 
