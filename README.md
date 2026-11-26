@@ -250,7 +250,7 @@ tsray version
 After a release is published on npm:
 
 ```sh
-npm install --global tsray
+npm install --global @yanulabs/tsray
 ```
 
 For a regular global install from a local checkout instead of a development link:
