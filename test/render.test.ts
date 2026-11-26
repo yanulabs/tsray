@@ -82,6 +82,8 @@ describe("report exporters", () => {
     expect(html).toContain("<!doctype html>");
     expect(html).toContain('id="tsray-data"');
     expect(html).toContain('data-tsray-live="false"');
+    expect(html).toContain('id="tsray-licenses"');
+    expect(html).toContain("Eclipse Public License - v 2.0");
     expect(html).toContain("fixture-react-app");
     expect(html).not.toContain(">__TSRAY_REPORT_DATA__</script>");
     expect(html).not.toContain("__TSRAY_LIVE__");

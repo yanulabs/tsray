@@ -2,15 +2,17 @@
 
 ## Setup
 
+Use the Node.js version in `.nvmrc`, then install from the committed lockfile:
+
 ```sh
-npm install
+npm ci
 npm run build
 ```
 
 Report UI work additionally requires:
 
 ```sh
-npm --prefix web install
+npm --prefix web ci
 npm run build:web
 ```
 
@@ -66,3 +68,39 @@ OpenCode configuration reloads automatically. Other clients may require a restar
 
 Use focused, atomic commits with conventional prefixes (`feat:`, `fix:`, `test:`, `docs:`,
 `chore:`). Keep generated report artifacts in their own commit when practical.
+
+## Pull requests
+
+- Search existing issues and pull requests before opening a new one.
+- Describe the problem, the approach, and any user-facing or MCP API changes.
+- Add or update tests for observable behavior. Avoid snapshots when an explicit assertion is
+  clearer.
+- Run `npm run verify`, `npm run build`, and `npm run pack:check` before requesting review.
+- For report UI changes, run `npm --prefix web ci` and `npm run build:web`, then commit both
+  `web/dist/report.html` and `src/render/report-template.generated.ts`.
+- Update `README.md`, `docs/ARCHITECTURE.md`, and `CHANGELOG.md` when behavior or public APIs
+  change.
+- Never include credentials, personal access tokens, private source data, or machine-specific
+  paths in commits, fixtures, or logs.
+
+Maintainers may request changes before merging. Reviews should focus on correctness, semantic
+TypeScript behavior, compatibility, security, and maintainability.
+
+## Security and conduct
+
+Do not disclose suspected vulnerabilities in a public issue. Follow [SECURITY.md](SECURITY.md) for
+private reporting. All contributors are expected to follow the
+[Code of Conduct](CODE_OF_CONDUCT.md).
+
+## Releases (maintainers)
+
+1. Update the version in `package.json`, `web/package.json`, `src/version.ts`, both lockfiles, and
+   `CHANGELOG.md`.
+2. Run `npm ci` in the root and `web/` directories, then run `npm run build:web` and commit both
+   generated report artifacts.
+3. Run `npm run verify` and `npm run pack:check`.
+4. Create and push a matching `vX.Y.Z` tag on a commit reachable from `main`. The release workflow
+   validates the tag, rechecks dependencies and generated artifacts, and publishes to npm.
+
+npm provenance is enabled automatically only when the GitHub repository is public. Publishing a
+public npm package does not change the repository's visibility.

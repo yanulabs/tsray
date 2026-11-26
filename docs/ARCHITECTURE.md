@@ -84,12 +84,12 @@ then:
 1. Reads every relevant tsconfig with `ts.readConfigFile` and
    `ts.parseJsonConfigFileContent`.
 2. Follows project references recursively and discovers workspace package configs.
-3. Merges compiler options, with the primary config winning. Relative `paths` from
-   referenced projects are converted to absolute targets so a single LanguageService can
-   resolve cross-package aliases.
+3. Assigns each source file to the broadest applicable project root and creates a separate
+   `LanguageService` for each owned project. Project references and workspace metadata remain
+   available for cross-package type resolution.
 4. Deduplicates source files, excludes `node_modules`, declaration files, and build output.
-5. Creates one `ts.LanguageService` with a custom host that caches `ScriptSnapshot`s by
-   per-file version.
+5. Uses custom LanguageService hosts that cache `ScriptSnapshot`s by per-file version. Full
+   multi-project indexes may distribute uncached projects across worker threads.
 
 `notifyFilesChanged()` canonicalizes paths (important for `/var` vs `/private/var` on macOS),
 bumps versions, adds or removes files from the program, invalidates snapshots, and marks
@@ -321,9 +321,10 @@ returns the current healthy snapshot or waits briefly for a rebuild.
 1. indexes the working tree;
 2. finds the git top level and base SHA;
 3. creates a detached temporary worktree;
-4. symlinks the main checkout's `node_modules` when available;
+4. initializes gitlinked submodules at the base ref, mirrors same-commit generated outputs and
+   nested `node_modules`, and symlinks the main checkout's `node_modules` when available;
 5. indexes the same relative subdirectory in the base worktree;
-6. compares cycles, exported symbols/signatures, dead code, and untested hotpots;
+6. compares cycles, exported symbols/signatures, dead code, and untested hotspots;
 7. returns JSON (or Markdown) and sets exit code `1` when a configured gate fails.
 
 Temporary worktrees are removed in `finally`.

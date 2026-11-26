@@ -8,20 +8,56 @@ permissions:
   contents: read
   id-token: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
   publish:
     name: Publish npm package
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
-          node-version: "22"
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "22.13.0"
           registry-url: "https://registry.npmjs.org"
           cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            web/package-lock.json
+      - name: Validate release tag
+        run: |
+          expected="v$(node -p "require('./package.json').version")"
+          if [ "$GITHUB_REF_NAME" != "$expected" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match package version $expected" >&2
+            exit 1
+          fi
+          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
       - run: npm ci
+      - run: npm --prefix web ci
+      - run: npm audit
+      - run: npm --prefix web audit
+      - run: npm run build:web
+      - name: Verify committed report HTML
+        run: git diff --exit-code -- web/dist/report.html
       - run: npm run verify
-      - run: npm run build
-      - run: npm publish --provenance --access public
+      - run: npm run pack:check
+      - name: Select npm provenance
+        id: provenance
+        env:
+          REPOSITORY_PRIVATE: ${{ github.event.repository.private }}
+        run: |
+          if [ "$REPOSITORY_PRIVATE" = "false" ]; then
+            echo "flag=--provenance" >> "$GITHUB_OUTPUT"
+          else
+            echo "flag=" >> "$GITHUB_OUTPUT"
+            echo "Repository is private; publishing without npm provenance."
+          fi
+      - run: npm publish --access public ${{ steps.provenance.outputs.flag }}
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

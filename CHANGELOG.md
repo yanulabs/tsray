@@ -1,5 +1,28 @@
 # Changelog
 
+## Unreleased
+
+### Added
+
+- Community health files: code of conduct, support guide, security policy, issue templates, and
+  pull request template.
+- npm package metadata, changelog/security files, and complete bundled-dependency license texts.
+- Standalone HTML reports now embed the project and bundled-dependency licenses plus the elkjs
+  source-availability statement.
+- Automated dependency updates and dependency audits in CI.
+- Cross-platform package-build checks for macOS and Windows.
+
+### Changed
+
+- CI now tests the minimum supported Node.js version, verifies generated report HTML and embedded
+  content, pins third-party actions by commit, and applies workflow timeouts and concurrency limits.
+- Releases validate the Git tag against `package.json`, require the tagged commit to be on `main`,
+  rebuild and verify report artifacts, and enable npm provenance only for public repositories.
+- Local report HTTP requests now validate `Host` and `Origin`, reject unsupported methods, and
+  return generic server errors without leaking stack traces.
+- npm packing builds the CLI automatically, verifies the published manifest, and ships
+  self-contained source maps.
+
 ## 0.1.0 — 2026-11-24
 
 Initial release.
