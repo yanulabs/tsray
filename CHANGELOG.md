@@ -5,7 +5,8 @@
 ### Changed
 
 - Release workflow now stages npm packages for maintainer 2FA approval instead of publishing
-  directly from CI with a bypass token, and uses Node.js 24 for staged-publishing support.
+  directly from CI with a bypass token, uses Node.js 24 for staged-publishing support, and
+  supports manual dispatch for an existing tag.
 
 ## 0.2.1 — 2026-11-26
 
