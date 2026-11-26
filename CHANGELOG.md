@@ -2,6 +2,13 @@
 
 ## Unreleased
 
+## 0.2.1 — 2026-11-26
+
+### Changed
+
+- Publish the npm package as `@yanulabs/tsray` under the Yanulabs npm organization. The CLI
+  binary remains `tsray`.
+
 ## 0.2.0 — 2026-11-26
 
 ### Added
