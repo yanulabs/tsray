@@ -51,3 +51,8 @@ Initial release.
 
 - Local report HTTP requests validate `Host` and `Origin`, reject unsupported methods, and
   return generic server errors without leaking stack traces.
+
+### Fixed
+
+- Resolve TypeScript project references that point directly to config files as well as directories,
+  so standard solution-style Vite projects are indexed instead of appearing empty.

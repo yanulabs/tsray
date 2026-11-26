@@ -13,6 +13,6 @@
       "@fixture/ui": ["../ui/src/index.ts"]
     }
   },
-  "references": [{ "path": "../ui" }],
+  "references": [{ "path": "../ui/tsconfig.json" }],
   "include": ["src", "../../types"]
 }
