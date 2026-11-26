@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+
+- Release workflow now stages npm packages for maintainer 2FA approval instead of publishing
+  directly from CI with a bypass token, and uses Node.js 24 for staged-publishing support.
+
 ## 0.2.1 — 2026-11-26
 
 ### Changed
