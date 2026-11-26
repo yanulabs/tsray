@@ -149,7 +149,7 @@ export class IndexController {
       this.pendingFiles.add(filePath);
       if (CONFIG_FILES.has(base) || base.startsWith("tsconfig.") || base.startsWith("vite.config.")) {
         this.needsConfigReload = true;
-      } else if (!isSourceFile(relative)) {
+      } else if (!isSourceFile(relative) && !/\.css$/i.test(relative)) {
         this.pendingFiles.delete(filePath);
         return;
       }

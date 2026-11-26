@@ -1,0 +1,6 @@
+@import "tailwindcss";
+@source "./**/*.tsx";
+
+@theme {
+  --color-brand: #06c;
+}

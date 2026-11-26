@@ -67,6 +67,8 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
     "chokidar": "^6.0.0",
+    "css-tree": "^3.2.1",
+    "lightningcss": "^1.33.0",
     "smol-toml": "^1.9.1",
     "typescript": "^5.9.3",
     "yaml": "^2.9.1",
@@ -74,9 +76,18 @@
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@types/css-tree": "^2.3.11",
     "@types/node": "^26.6.6",
     "eslint": "^10.15.0",
     "typescript-eslint": "^8.74.0",
     "vitest": "^5.1.1"
+  },
+  "peerDependencies": {
+    "playwright": ">=1.45.0"
+  },
+  "peerDependenciesMeta": {
+    "playwright": {
+      "optional": true
+    }
   }
 }

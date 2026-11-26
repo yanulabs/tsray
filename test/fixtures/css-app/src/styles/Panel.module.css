@@ -1,0 +1,17 @@
+.panel {
+  display: grid;
+  gap: 1px;
+}
+
+.composedBase {
+  color: inherit;
+}
+
+.panelTitle {
+  composes: composedBase;
+  font-weight: 600;
+}
+
+.icon-button {
+  display: inline-flex;
+}

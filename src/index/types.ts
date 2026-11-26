@@ -1,3 +1,5 @@
+import type ts from "typescript";
+
 /**
  * Shared domain model for the tsray index.
  *
@@ -183,6 +185,14 @@ export interface ProjectConfigInfo {
   path: string;
   fileCount: number;
   references: string[];
+}
+
+/** Project metadata for auxiliary analyses that need their own TypeChecker. */
+export interface AnalysisProjectConfig {
+  tsconfigPath: string;
+  compilerOptions: ts.CompilerOptions;
+  rootNames: string[];
+  ownedFiles: string[];
 }
 
 export interface IndexSnapshot {

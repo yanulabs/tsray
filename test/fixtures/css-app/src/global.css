@@ -1,0 +1,92 @@
+@layer base, components;
+
+@layer base {
+  :root {
+    --brand: #06c;
+  }
+
+  .winner {
+    color: red;
+  }
+
+  .winner-important {
+    color: red !important;
+  }
+
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+  }
+}
+
+@layer components {
+  .card {
+    color: var(--brand);
+    display: flex;
+    gap: 0.5rem;
+  }
+
+  .winner {
+    color: green;
+  }
+
+  .winner-important {
+    color: green !important;
+  }
+}
+
+.winner {
+  color: blue;
+}
+
+.winner-important {
+  color: blue !important;
+}
+
+.subject {
+  color: black;
+}
+
+.subject .child {
+  color: red;
+}
+
+.subject::before {
+  content: "subject-marker";
+}
+
+.used-global {
+  color: green;
+}
+
+.unused-global {
+  color: gray;
+}
+
+.tone-warm {
+  color: orange;
+}
+
+.label-class {
+  color: blue;
+}
+
+.slot-class {
+  color: purple;
+}
+
+.sm\:hidden {
+  display: none;
+}
+
+@keyframes spin {
+  0% {
+    opacity: 0;
+  }
+
+  100% {
+    opacity: 1;
+  }
+}

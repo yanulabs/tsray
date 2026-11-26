@@ -35,6 +35,18 @@ The index snapshot is treated as immutable after `buildIndex()` returns. Derived
 indexes (incoming/outgoing adjacency, fan-in, test reachability, module rollups) are cached
 in a `WeakMap` keyed by the snapshot, so MCP calls reuse them until the snapshot changes.
 
+CSS analysis is a separate on-demand layer. It asks the indexer for project compiler options
+and builds a short-lived `ts.Program` to extract CSS Module imports and `className` bindings,
+then parses imported `.css` files with `css-tree`. It never mutates the TypeScript snapshot or
+the working SQLite database. The service caches one result keyed by the indexer revision and
+the requested `extra_css_files`; watched `.css` files bump that revision even when the
+TypeScript graph digest is unchanged. Build outputs (`dist`, `build`, `generated`, and
+`node_modules`) are skipped by default and can be analyzed explicitly through
+`extra_css_files` or `include_generated: true`. Tailwind files contribute their plain CSS
+rules and `@theme` tokens; generated utilities require compiled CSS or the Playwright runtime
+check. The opt-in global-class audit uses static `className`, helper, template-prefix, and DOM
+`classList` signals and reports warnings rather than hard failures.
+
 ## Source modules
 
 | Module | Responsibility |
@@ -42,19 +54,29 @@ in a `WeakMap` keyed by the snapshot, so MCP calls reuse them until the snapshot
 | `src/util/paths.ts` | tsconfig/workspace discovery, project metadata, module grouping, package entrypoints |
 | `src/util/glob.ts` | Entrypoint/test/exclude glob matching, built-in framework patterns |
 | `src/util/source.ts` | Directives, cyclomatic complexity, JSDoc, JSX detection, exports |
-| `src/index/types.ts` | Domain model and canonical ID shapes |
+| `src/index/types.ts` | Domain model, canonical ID shapes, auxiliary analysis project metadata |
+| `src/css/` | On-demand CSS/CSS Modules AST, TypeScript className bindings, cascade, diagnostics, optional Playwright runtime checks |
 | `src/index/hasher.ts` | Normalized AST printing, direct hashes, iterative SCC decomposition |
-| `src/index/indexer.ts` | LanguageService host, symbol/edge extraction, diagnostics, file imports |
-| `src/index/queries.ts` | Impact, dead code, hotspots, references, call/component graphs, modules |
+| `src/index/indexer.ts` | Index orchestration facade; project loading, cache/worker coordination, incremental invalidation |
+| `src/index/indexer/` | Project symbol/edge pass, cache hashing, symbol classification, shared types |
+| `src/index/queries.ts` | Query facade re-exporting graph/module/symbol/audit/impact domains |
+| `src/index/queries/` | Graph index, modules, symbols, call/component graphs, implementations, audit, impact |
 | `src/index/watch.ts` | chokidar debounce, selective invalidation, last-healthy snapshot |
 | `src/cache/summary.ts` | Zod validation of client-generated summaries |
-| `src/cache/store.ts` | Dual SQLite, staleness, LRU touches, coverage, prune/remove |
-| `src/render/exporters.ts` | Report payload and Markdown/DOT/Mermaid/HTML/JSON output |
+| `src/cache/store.ts` | Cache facade re-exporting working/summary stores, paths, schemas |
+| `src/cache/store/` | Dual SQLite store, working/summary databases, staleness, coverage, read-only cache, prune/remove |
+| `src/render/exporters.ts` | Export facade re-exporting payload, Markdown, graph, JSON, and HTML modules |
+| `src/render/exporters/` | Report payload and Markdown/DOT/Mermaid/HTML/JSON output |
 | `src/mcp/server.ts` | MCP stdio transport, HTTP API, port fallback, live HTML |
-| `src/tools/tools.ts` | MCP tool registry and projections |
+| `src/tools/tools.ts` | MCP composition root; wires domain modules to one server |
+| `src/tools/domains/` | Project, architecture, symbol, React, audit, summary, command, CSS, and maintenance tool domains |
+| `src/tools/shared/` | Registration context, schemas, argument parsing, result helpers, symbol resolution, and shared projections |
+| `src/tools/response.ts` | Bounded JSON/text response budgets and pagination helpers |
 | `src/tools/runner.ts` | package-manager/script/test/lint/typecheck detection |
-| `src/cli/index.ts` | CLI parsing and command routing |
-| `src/cli/diff.ts` | Detached worktree diff and CI gates |
+| `src/cli/index.ts` | CLI parsing and command dispatch |
+| `src/cli/commands/` | serve/index/export/diff/db/integration command handlers |
+| `src/cli/diff.ts` | Diff facade re-exporting worktree snapshot, execution, and Markdown rendering |
+| `src/cli/diff/` | Detached worktree preparation, snapshot comparison, and CI gates |
 | `src/cli/integration.ts` | MCP/skill target selection and command orchestration |
 | `src/integration/config.ts` | Atomic JSON/TOML MCP config editing and validation |
 | `src/integration/clients.ts` | Client config paths, format inference, and detection |

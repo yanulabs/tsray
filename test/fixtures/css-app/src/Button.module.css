@@ -1,0 +1,42 @@
+@layer components {
+  .root {
+    display: inline-flex;
+    color: var(--brand);
+  }
+
+  .root:hover {
+    color: red;
+  }
+
+  .root {
+    &:focus-visible {
+      outline: 1px solid currentColor;
+    }
+  }
+
+  .primary {
+    background: var(--brand);
+  }
+
+  .secondary {
+    background: gray;
+  }
+
+  .toggled {
+    outline: 1px solid;
+  }
+
+  .unused {
+    color: purple;
+  }
+
+  :global(.external) .root {
+    color: green;
+  }
+}
+
+@media (min-width: 40rem) {
+  .root {
+    padding: 1rem;
+  }
+}

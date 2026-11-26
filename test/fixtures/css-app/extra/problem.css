@@ -1,0 +1,41 @@
+.broken {
+  display: inline;
+  width: 10px;
+  color: var(--missing);
+}
+
+.duplicate {
+  color: red;
+  color: red;
+}
+
+.fallback {
+  min-height: 100svh;
+  min-height: 100dvh;
+}
+
+.cycle {
+  --a: var(--b);
+  --b: var(--a);
+}
+
+.valid-keyframes {
+  animation: spin 1s linear;
+}
+
+.data {
+  content: "a;b:c";
+  background-image: url("data:image/svg+xml;base64,abc");
+}
+
+.invalid {
+  color: notacolor;
+}
+
+.modern {
+  width: calc-size(auto, size);
+  color: contrast-color(red);
+  display: masonry;
+  background: paint(foo);
+  animation-timeline: scroll();
+}
