@@ -2,7 +2,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
-import { VERSION } from "../src/version.js";
+import { formatVersion, VERSION } from "../src/version.js";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
 
@@ -14,5 +14,9 @@ describe("package metadata", () => {
     };
     expect(VERSION).toBe(pkg.version);
     expect(pkg.engines?.node).toContain("22.13");
+  });
+
+  it("formats version output in the conventional Unix style", () => {
+    expect(formatVersion()).toBe(`tsray ${VERSION}`);
   });
 });

@@ -16,7 +16,7 @@ import { IndexController } from "../index/watch.js";
 import { startServe, openUrl } from "../mcp/server.js";
 import { exportDot, exportHtml, exportJson, exportMarkdown, exportMermaid } from "../render/exporters.js";
 import { resolveProject } from "../util/paths.js";
-import { VERSION } from "../version.js";
+import { formatVersion, VERSION } from "../version.js";
 import { GitDiffError, diffMarkdown, runArchitecturalDiff } from "./diff.js";
 import { runMcpIntegration, runSkillIntegration } from "./integration.js";
 
@@ -178,7 +178,7 @@ async function main(): Promise<void> {
   });
 
   if (boolValue(values.version)) {
-    process.stdout.write(`${VERSION}\n`);
+    process.stdout.write(`${formatVersion()}\n`);
     return;
   }
   if (boolValue(values.help)) {
@@ -194,7 +194,7 @@ async function main(): Promise<void> {
   }
 
   if (command === "version") {
-    process.stdout.write(`${VERSION}\n`);
+    process.stdout.write(`${formatVersion()}\n`);
     return;
   }
 

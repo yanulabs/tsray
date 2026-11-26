@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+### Changed
+
+- `version`, `--version`, and `-v` now print conventional Unix-style output (`tsray 0.1.0`)
+  instead of only the raw version number.
+
 ## 0.1.0 — 2026-11-26
 
 Initial release.
