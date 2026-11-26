@@ -1,0 +1,7 @@
+@import "./imported.css";
+
+@layer components {
+  .import-winner {
+    color: green !important;
+  }
+}
